@@ -1,7 +1,14 @@
 
 import torch
+from torch import nn
 import torch.nn.functional as F
 from transformers import LongformerModel, RobertaTokenizer
+from transformers import LongformerConfig
+from torchsummary import summary
+
+
+def add_cross_attention_modules(model):
+    print(model)
 
 
 def pad_to_window_size(input_ids: torch.Tensor, attention_mask: torch.Tensor,
@@ -39,8 +46,11 @@ class LongFormer(BaseModel):
 
 
 if __name__ == '__main__':
+    config = LongformerConfig()
+    model = LongformerModel(config, cross_modality = True)
+    add_cross_attention_modules(model)
 
-    model = LongFormer()
+    """
     model = model.model
     tokenizer = RobertaTokenizer.from_pretrained('roberta-base')
     tokenizer.model_max_length = model.config.max_position_embeddings
@@ -63,3 +73,4 @@ if __name__ == '__main__':
             input_ids, attention_mask, config.attention_window[0], tokenizer.pad_token_id)
 
     output = model(input_ids, attention_mask=attention_mask)[0]
+    """
