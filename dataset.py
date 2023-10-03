@@ -24,8 +24,11 @@ class MuLD_Dataset(HFDataset):
         except FileNotFoundError:
             print("Dataset not found, loading from huggingface")
             dataset = self.get_dataset(split=split, streaming=streaming)
-            dataset = dataset.map(self.preprocess).map(self.tokenize, batched=True)
-            dataset.save_to_disk(CACHE_PATH)
+            dataset = dataset.map(self.preprocess)
+            dataset = dataset.remove_columns(["input", "metadata"])
+            dataset = dataset.rename_column("output", "label")
+            dataset = dataset.map(self.tokenize, batched=False)
+            # dataset.save_to_disk(CACHE_PATH)  # TODO: unable to save IterableDataset
             self.dataset = dataset
 
         self.tokenizer = tokenizer
@@ -41,31 +44,29 @@ class MuLD_Dataset(HFDataset):
         """Preprocess the dataset with basic cleanup and splitting into query and document"""
 
         # remove BOM tags: '\u00ef\u00bb\u00bf' and HTML tags using regex
-        example["input"] = example["input"].replace("\u00ef\u00bb\u00bf", "")
-        example["input"] = re.sub(r"<.*?>", "", example["input"])
+        input = example["input"].replace("\u00ef\u00bb\u00bf", "")
+        input = re.sub(r"<.*?>", "", input)
         # remove newlines and extra spaces
-        example["input"] = example["input"].replace("\n", " ").strip()
+        input = input.replace("\n", " ").strip()
 
         # splits input into query and document
-        query, document = example["input"].split("?", 1)
+        query, document = input.split("?", 1)
         query = query.strip() + "?"
 
-        # update example
-        example["query"] = query
-        example["document"] = document
-        example["label"] = example["output"]  # rename output to label for hf compatibility
-
-        example.pop("input")
-        example.pop("metadata")
-        example.pop("output")
-        return example
+        return {"query": query, "document": document}
 
     def tokenize(self, example: dict) -> dict:
         """Tokenize the dataset with the encoder tokenizer"""
-        return self.tokenizer(
-            example,  #TODO: check if this is correct
+        tokenized_query = self.tokenizer(
+            example["query"],
             padding=True,
-            padding_side="left",
+            truncation=False,
+            return_tensors="pt",
+            pad_to_multiple_of=8,
+        )
+        tokenized_document = self.tokenizer(
+            example["document"],  # TODO: check if each chunk has a BOS token
+            padding=True,
             truncation=True,
             max_length=self.chunk_size,
             return_tensors="pt",
@@ -73,21 +74,36 @@ class MuLD_Dataset(HFDataset):
             return_overflowing_tokens=True,
         )
 
-    def chunk(self, example: dict) -> dict:
-        """Split the document into chunks of size chunk_size"""
-        document = example["document"]
-        chunks = [
-            document[i : i + self.chunk_size]
-            for i in range(0, len(document), self.chunk_size)
-        ]
-        example["document"] = chunks
-        return example
+        return_dict = {
+            "query_ids": tokenized_query.input_ids,
+            "query_attention_mask": tokenized_query.attention_mask,
+            "document_ids": tokenized_document.input_ids,
+            "document_attention_mask": tokenized_document.attention_mask,
+        }
+
+        if "label" in example:
+            tokenized_output = self.tokenizer(
+                example["label"],
+                padding=True,
+                truncation=False,
+                return_tensors="pt",
+                pad_to_multiple_of=8,
+            )
+            return_dict["label_ids"] = tokenized_output.input_ids
+            return_dict["label_attention_mask"] = tokenized_output.attention_mask
+
+        return return_dict
 
 
 if __name__ == "__main__":
     from transformers import AutoTokenizer
-    tokenizer = AutoTokenizer.from_pretrained("longformer-base-4096")
-    muld = MuLD_Dataset(streaming=True, tokenizer=tokenizer)
-    print(muld.dataset["train"][0].keys())
-    print(muld.dataset["train"][0]["query"])
-    print(muld.dataset["train"][0]["output"])
+
+    tokenizer = AutoTokenizer.from_pretrained("allenai/longformer-base-4096")
+    muld = MuLD_Dataset(streaming=True, split="validation", tokenizer=tokenizer)
+    for ex in muld.dataset:
+        break
+    print(ex.keys())
+    print(ex["query_ids"].shape)
+    print(ex["document_ids"].shape)
+    print(ex["query_attention_mask"].shape)
+    print(ex["document_attention_mask"].shape)
