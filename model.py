@@ -30,7 +30,7 @@ class LDQAModel(PreTrainedModel):
         query_attention_mask=None,
         document_attention_mask=None,
         global_attention_mask=None,
-        labels=None,
+        label_ids=None,
     ):
         """Performs a forward pass through the model. Returns loss and logits if labels are provided else returns logits only.
         :param query_ids: torch.LongTensor of shape [batch_size, query_length]
@@ -57,8 +57,8 @@ class LDQAModel(PreTrainedModel):
         )
 
         # compute loss if labels are provided
-        if labels is not None:
-            loss = self.loss_fct(base_lm_outputs.logits, labels)
+        if label_ids is not None:
+            loss = self.loss_fct(base_lm_outputs.logits, label_ids)
             return loss, base_lm_outputs.logits
         else:
             return base_lm_outputs.logits
