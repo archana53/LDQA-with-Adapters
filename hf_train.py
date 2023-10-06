@@ -11,7 +11,7 @@ from transformers import (
 )
 
 from dataset import DataCollatorForLDQA, MuLD_Dataset
-from encoder import Encoder, EncoderType
+from encoder import EncoderType
 from model import LDQAModel, LDQAModelConfig
 from projection_heads import ProjectionHeadType
 
@@ -83,7 +83,8 @@ if __name__ == "__main__":
     base_lm.load_state_dict(model_original.state_dict(), strict=False)
 
     model_tokenizer = AutoTokenizer.from_pretrained("allenai/longformer-base-4096")
-    encoder = Encoder(EncoderType.LongFormer).model
+    encoder_config = EncoderType[lm_args.encoder_type].value()
+    encoder = encoder_config.get_model()
 
     # set up projection head
     projection_head_config = ProjectionHeadType[projection_args.proj_type].value
