@@ -1,3 +1,4 @@
+import torch
 import torch.nn as nn
 from transformers import PreTrainedModel, PretrainedConfig
 
@@ -15,12 +16,15 @@ class LDQAModelConfig(PretrainedConfig):
 class LDQAModel(PreTrainedModel):
     config_class = LDQAModelConfig
 
-    def __init__(self, config):
+    def __init__(self, config, base_lm, encoder, projection_head):
         super().__init__(config)
-        if config.model_type == "longformer":
-            # TODO: WIP. Functions are not implemented yet.
-            self.base_lm = get_longformer_with_cross_attention()
-            self.encoder = get_longformer_encoder()
+        # TODO: WIP. Functions are not implemented yet.
+        # self.base_lm = config.get_base_lm()
+        # self.encoder = config.get_encoder()
+        # self.projection_head = config.get_projection_head()
+        self.base_lm = base_lm
+        self.encoder = encoder
+        self.projection_head = projection_head
         self.loss_fct = nn.CrossEntropyLoss()
 
     def forward(
@@ -41,11 +45,28 @@ class LDQAModel(PreTrainedModel):
         :param labels: torch.LongTensor of shape [batch_size, labels_length]
         :return: loss, logits
         """
-        # get encoded document
-        document_outputs = self.encoder(
-            document_ids,
-            attention_mask=document_attention_mask,
-            global_attention_mask=global_attention_mask,
+        # iterate over document chunks and encode or
+        # try reshaping document_ids and document_attention_mask
+        # TODO: save document embeddings offline and load them here
+        document_outputs = []
+        with torch.no_grad():
+            for i in range(document_ids.shape[1]):
+                chunk_document_ids = document_ids[:, i]
+                chunk_document_attention_mask = document_attention_mask[:, i]
+                document_output = self.encoder(
+                    chunk_document_ids,
+                    attention_mask=chunk_document_attention_mask,
+                    global_attention_mask=global_attention_mask,
+                )
+                document_outputs.append(document_output)
+            document_outputs = torch.cat(document_outputs, dim=1)
+
+        # pass encoded document to projection head
+        document_outputs = self.projection_head(document_outputs.last_hidden_state)
+        attention_mask = torch.ones(  # consider all tokens with projection head
+            document_outputs.shape[0],
+            document_outputs.shape[1],
+            dtype=document_attention_mask.dtype,
         )
 
         # pass encoded document and query to base-lm
@@ -53,7 +74,7 @@ class LDQAModel(PreTrainedModel):
             query_ids,
             attention_mask=query_attention_mask,
             cross_modality_inputs=document_outputs.last_hidden_state,
-            cross_modality_attention_mask=document_outputs.attention_mask,
+            cross_modality_attention_mask=attention_mask,
         )
 
         # compute loss if labels are provided
