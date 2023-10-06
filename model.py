@@ -58,11 +58,11 @@ class LDQAModel(PreTrainedModel):
                     attention_mask=chunk_document_attention_mask,
                     global_attention_mask=global_attention_mask,
                 )
-                document_outputs.append(document_output)
+                document_outputs.append(document_output.last_hidden_state)
             document_outputs = torch.cat(document_outputs, dim=1)
 
         # pass encoded document to projection head
-        document_outputs = self.projection_head(document_outputs.last_hidden_state)
+        document_outputs = self.projection_head(document_outputs)
         attention_mask = torch.ones(  # consider all tokens with projection head
             document_outputs.shape[0],
             document_outputs.shape[1],
@@ -73,8 +73,8 @@ class LDQAModel(PreTrainedModel):
         base_lm_outputs = self.base_lm(
             query_ids,
             attention_mask=query_attention_mask,
-            cross_modality_inputs=document_outputs.last_hidden_state,
-            cross_modality_attention_mask=attention_mask,
+            cross_modality_inputs=document_outputs,
+            cross_modality_attention_masks=attention_mask,
         )
 
         # compute loss if labels are provided
