@@ -1,35 +1,34 @@
 import argparse
 import itertools
 
+from datasets import IterableDataset
+from torch import optim, utils
 from torch.optim import Adam
+from torch.utils.data import DataLoader
+
+from dataset import MuLD_Dataset
+from encoder import EncoderType
 from transformers import (
     AutoTokenizer,
+    DataCollatorForSeq2Seq,
+    LongformerConfig,
+    LongformerForQuestionAnswering,
     LongformerModel,
+    RobertaTokenizer,
     Trainer,
     TrainingArguments,
     get_scheduler,
 )
 
-from dataset import DataCollatorForLDQA, MuLD_Dataset
-from encoder import EncoderType
-from model import LDQAModel, LDQAModelConfig
-from projection_heads import ProjectionHeadType
+def my_generator(n):
+    for i in range(n):
+        yield {"input": "sample text", "output": "filler text", "metadata": []}
 
 
 def parse_args():
     parser = argparse.ArgumentParser()
-
-    train = parser.add_argument_group("Training")
-    train.add_argument("--batch_size", type=int, default=32000)
-    train.add_argument("--total_steps", type=int, default=32000)
-    train.add_argument("--lr", type=float, default=1e-3)
-    train.add_argument("--weight_decay", type=float, default=0.01)
-    train.add_argument("--warmup_steps", type=int, default=0)
-    train.add_argument("--save_steps", type=int, default=1000)
-    train.add_argument("--save_total_limit", type=int, default=2)
-
-    lm = parser.add_argument_group("LM")
-    lm.add_argument(
+    parser.add_argument("--batch_size", type=int, default=1)
+    parser.add_argument(
         "--encoder_type",
         type=str,
         default="LongFormer",
@@ -155,3 +154,4 @@ if __name__ == "__main__":
     )
 
     trainer.train()
+

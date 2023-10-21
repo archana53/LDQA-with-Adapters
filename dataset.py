@@ -17,6 +17,10 @@ class HFDataset:
         raise NotImplementedError
 
 
+class MuLD_Dataset(Dataset):
+    def __init__(self):
+        super(MuLD_Dataset, self).__init__()
+        self.dataset_uuid = "ghomasHudson/muld"
 class MuLD_Dataset(HFDataset):
     """HuggingFace MuLD Dataset for NarrativeQA
     Downloads the dataset from HuggingFace or loads from disk
