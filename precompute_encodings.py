@@ -54,16 +54,13 @@ if __name__ == "__main__":
     test_json = open(os.path.join(args.dest, "test.json"), "w", encoding="utf-8")
 
     # store unique documents to avoid recomputing embeddings
-    unique_documents = {}
+    unique_documents = set()
 
     # iterate over dataset and store document embeddings
     for dataset, json_handler in [(train_dataset, train_json), (val_dataset, val_json), (test_dataset, test_json)]:
         for example in tqdm(dataset):
             document = example["document"]
-            
             if document in unique_documents:
-                example[f"{args.encoder_type}_document_embeddings"] = unique_documents[document]
-                json_handler.write(json.dumps(example) + "\n")
                 continue
 
             document_ids = example["document_ids"]
@@ -74,13 +71,10 @@ if __name__ == "__main__":
                 document_attention_mask=document_attention_mask,
                 global_attention_mask=global_attention_mask,
             )
-            example[f"{args.encoder_type.lower()}_document_embeddings"] = document_embeddings
+            unique_documents.add(document)
             
             # convert tensors to lists for json serialization
-            for key, value in example.items():
-                if isinstance(value, torch.Tensor):
-                    example[key] = value.tolist()
-            json_handler.write(json.dumps(example) + "\n")
+            json_handler.write(json.dumps({document: document_embeddings.tolist()}) + "\n")
 
     # close json file handles
     train_json.close()
