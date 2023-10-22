@@ -152,3 +152,42 @@ class LDQAModel(PreTrainedModel):
         return shift_tokens_right(
             labels, self.config.pad_token_id, self.config.decoder_start_token_id
         )
+
+
+class EncoderOnlyModelConfig(PretrainedConfig):
+    model_type = "encoder_only"
+
+    def __init__(self, model_type="longformer", **kwargs):
+        super().__init__(**kwargs)
+        if model_type != "longformer":
+            raise ValueError("Only longformer is supported")
+        self.model_type = model_type
+
+
+class EncoderOnlyModel(PreTrainedModel):
+    """Class for encoder only model. This model is used to precompute document embeddings."""
+    config_class = EncoderOnlyModelConfig
+
+    def __init__(self, config, encoder):
+        super().__init__(config)
+        self.encoder = encoder
+
+    def forward(
+        self,
+        document_ids,
+        document_attention_mask=None,
+        global_attention_mask=None,
+    ):
+        """Performs a forward pass through the model. Returns loss and logits if labels are provided else returns logits only.
+        :param document_ids: torch.LongTensor of shape [batch_size, document_length]
+        :param document_attention_mask: torch.LongTensor of shape [batch_size, document_length]
+        :param global_attention_mask: torch.LongTensor of shape [batch_size, document_length]
+        :return: loss, logits
+        """
+        with torch.inference_mode():
+            document_outputs = self.encoder(
+                document_ids,
+                document_attention_mask,
+                global_attention_mask=global_attention_mask,
+            )
+        return document_outputs.last_hidden_state
