@@ -1,8 +1,7 @@
 import argparse
 import os
-import json
+import h5py
 
-import torch
 from transformers import AutoTokenizer
 from tqdm import tqdm
 
@@ -20,6 +19,9 @@ def parse_args():
         choices=["LongFormer", "LongT5", "LLaMa"],
     )
     parser.add_argument("--dest", type=str, help="destination directory for new dataset")
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("--resume", action="store_true", help="resume from last checkpoint")
+    group.add_argument("--force", action="store_true", help="force overwrite existing embeddings")
     args = parser.parse_args()
 
     return args
@@ -36,47 +38,47 @@ if __name__ == "__main__":
 
     # set up EncoderOnly model
     model_config = EncoderOnlyModelConfig()
-    model = EncoderOnlyModel(model_config, encoder) 
+    model = EncoderOnlyModel(model_config, encoder)
 
-    muld_object = MuLD_Dataset(
-        tokenizer=model_tokenizer, split=None, streaming=True, chunk_size=4096
-    )
+    muld_object = MuLD_Dataset(tokenizer=model_tokenizer, split=None, streaming=True, chunk_size=4096)
     train_dataset = muld_object.dataset["train"].map(muld_object.tokenize)
     val_dataset = muld_object.dataset["validation"].map(muld_object.tokenize)
     test_dataset = muld_object.dataset["test"].map(muld_object.tokenize)
 
-    # set up json file handles for storing precomputed embeddings
+    # set up h5py file handles for storing precomputed embeddings
     if not os.path.exists(args.dest):
         os.mkdir(args.dest)
-        
-    train_json = open(os.path.join(args.dest, "train.json"), "w", encoding="utf-8")
-    val_json = open(os.path.join(args.dest, "val.json"), "w", encoding="utf-8")
-    test_json = open(os.path.join(args.dest, "test.json"), "w", encoding="utf-8")
+    h5py_dest = os.path.join(args.dest, "embeddings.h5")
+    already_exists = True if os.path.exists(h5py_dest) else False
 
-    # store unique documents to avoid recomputing embeddings
-    unique_documents = set()
-
-    # iterate over dataset and store document embeddings
-    for dataset, json_handler in [(train_dataset, train_json), (val_dataset, val_json), (test_dataset, test_json)]:
-        for example in tqdm(dataset):
-            document = example["document"]
-            if document in unique_documents:
-                continue
-
-            document_ids = example["document_ids"]
-            document_attention_mask = example["document_attention_mask"]
-            global_attention_mask = None
-            document_embeddings = model(
-                document_ids,
-                document_attention_mask=document_attention_mask,
-                global_attention_mask=global_attention_mask,
+    with h5py.File(h5py_dest, "a", swmr=True) as embedding_store:
+        # if resume, load keys from the embedding store
+        if args.force:
+            print("Overwriting existing embeddings")
+            embedding_store.clear()
+        elif already_exists and not args.resume:
+            raise ValueError(
+                "Embedding store already exists. Use --resume to resume"
+                "from the existing checkpoint or --force to overwrite."
             )
-            unique_documents.add(document)
-            
-            # convert tensors to lists for json serialization
-            json_handler.write(json.dumps({document: document_embeddings.tolist()}) + "\n")
 
-    # close json file handles
-    train_json.close()
-    val_json.close()
-    test_json.close()
+        # iterate over dataset and store document embeddings
+        for dataset in [train_dataset, val_dataset, test_dataset]:
+            for example in tqdm(dataset):
+                document = example["document"]
+
+                # skip if document already in embedding store
+                if document in embedding_store:
+                    continue
+
+                document_ids = example["document_ids"]
+                document_attention_mask = example["document_attention_mask"]
+                global_attention_mask = None
+                document_embeddings = model(
+                    document_ids,
+                    document_attention_mask=document_attention_mask,
+                    global_attention_mask=global_attention_mask,
+                )
+
+                # store document embeddings
+                embedding_store.create_dataset(document, data=document_embeddings.numpy())
