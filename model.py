@@ -58,8 +58,10 @@ class LDQAModel(PreTrainedModel):
                     attention_mask=chunk_document_attention_mask,
                     global_attention_mask=global_attention_mask,
                 )
+                # document_output.last_hidden_state.shape = [batch_size, chunk_length, hidden_size]
                 document_outputs.append(document_output.last_hidden_state)
-            document_outputs = torch.cat(document_outputs, dim=1)
+            document_outputs = torch.stack(document_outputs, dim=1)
+            # document_outputs.shape = [batch_size, num_chunks, chunk_length, hidden_size]
 
         # pass encoded document to projection head
         document_outputs = self.projection_head(document_outputs)
@@ -67,19 +69,16 @@ class LDQAModel(PreTrainedModel):
             document_outputs.shape[0],
             document_outputs.shape[1],
             dtype=document_attention_mask.dtype,
+            device=self.base_lm.device
         )
 
         # pass encoded document and query to base-lm
         base_lm_outputs = self.base_lm(
             query_ids,
+            labels=label_ids,
             attention_mask=query_attention_mask,
-            cross_modality_inputs=document_outputs,
-            cross_modality_attention_masks=attention_mask,
+            encoder_cross_modality_inputs=document_outputs,
+            encoder_cross_modality_attention_masks=attention_mask,
         )
 
-        # compute loss if labels are provided
-        if label_ids is not None:
-            loss = self.loss_fct(base_lm_outputs.logits, label_ids)
-            return loss, base_lm_outputs.logits
-        else:
-            return base_lm_outputs.logits
+        return base_lm_outputs

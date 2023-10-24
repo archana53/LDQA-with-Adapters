@@ -102,13 +102,10 @@ class AvgPoolProjectionHead(nn.Module):
         super().__init__()
         self.input_dim = input_dim
         self.output_dim = output_dim
-        self.avg_pool = nn.AdaptiveAvgPool1d(1)
         self.projection = nn.Linear(self.input_dim, self.output_dim)
 
     def forward(self, x):
-        x = x.transpose(1, 2)
-        x = self.avg_pool(x)
-        x = x.squeeze(-1)
+        x = x.mean(dim=2)
         x = self.projection(x)
         return x
 
@@ -120,13 +117,10 @@ class MaxPoolProjectionHead(nn.Module):
         super().__init__()
         self.input_dim = input_dim
         self.output_dim = output_dim
-        self.max_pool = nn.AdaptiveMaxPool1d(1)
         self.projection = nn.Linear(self.input_dim, self.output_dim)
 
     def forward(self, x):
-        x = x.transpose(1, 2)
-        x = self.max_pool(x)
-        x = x.squeeze(-1)
+        x = x.max(dim=2)
         x = self.projection(x)
         return x
 

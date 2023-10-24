@@ -4,7 +4,7 @@ import itertools
 from torch.optim import Adam
 from transformers import (
     AutoTokenizer,
-    LongformerModel,
+    LEDForConditionalGeneration,
     Trainer,
     TrainingArguments,
     get_scheduler,
@@ -20,7 +20,7 @@ def parse_args():
     parser = argparse.ArgumentParser()
 
     train = parser.add_argument_group("Training")
-    train.add_argument("--batch_size", type=int, default=32000)
+    train.add_argument("--batch_size", type=int, default=1)
     train.add_argument("--total_steps", type=int, default=32000)
     train.add_argument("--lr", type=float, default=1e-3)
     train.add_argument("--weight_decay", type=float, default=0.01)
@@ -78,11 +78,11 @@ if __name__ == "__main__":
     projection_args = all_args["Projection"]
 
     # set up base-lm and document encoder
-    model_original = LongformerModel.from_pretrained("allenai/longformer-base-4096")
-    base_lm = LongformerModel(model_original.config, cross_modality=True)
+    model_original = LEDForConditionalGeneration.from_pretrained("allenai/led-base-16384")
+    base_lm = LEDForConditionalGeneration(model_original.config, cross_modality_encoder=True)
     base_lm.load_state_dict(model_original.state_dict(), strict=False)
 
-    model_tokenizer = AutoTokenizer.from_pretrained("allenai/longformer-base-4096")
+    model_tokenizer = AutoTokenizer.from_pretrained("allenai/led-base-16384")
     encoder_config = EncoderType[lm_args.encoder_type].value()
     encoder = encoder_config.get_model()
 
