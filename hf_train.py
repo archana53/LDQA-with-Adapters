@@ -79,7 +79,7 @@ if __name__ == "__main__":
 
     # set up base-lm and document encoder
     model_original = LEDForConditionalGeneration.from_pretrained("allenai/led-base-16384")
-    base_lm = LEDForConditionalGeneration(model_original.config, cross_modality_encoder=True)
+    base_lm = LEDForConditionalGeneration(model_original.config, cross_attn_encoder=True)
     base_lm.load_state_dict(model_original.state_dict(), strict=False)
 
     model_tokenizer = AutoTokenizer.from_pretrained("allenai/led-base-16384")

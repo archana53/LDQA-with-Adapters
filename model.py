@@ -77,8 +77,8 @@ class LDQAModel(PreTrainedModel):
             query_ids,
             labels=label_ids,
             attention_mask=query_attention_mask,
-            encoder_cross_modality_inputs=document_outputs,
-            encoder_cross_modality_attention_masks=attention_mask,
+            encoder_cross_attn_inputs=document_outputs,
+            encoder_cross_attn_attention_masks=attention_mask,
         )
 
         return base_lm_outputs
