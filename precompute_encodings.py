@@ -77,11 +77,11 @@ if __name__ == "__main__":
                 document_attention_mask = example["document_attention_mask"].to("cuda")
                 global_attention_mask = None
 
-                # iterate over chunks
+                # iterate over chunks with batch size 4
                 document_embeddings = []
-                for i in range(document_ids.shape[0]):
-                    chunk_ids = document_ids[i].unsqueeze(0)
-                    chunk_attention_mask = document_attention_mask[i].unsqueeze(0)
+                for i in range(0, document_ids.shape[0], 4):
+                    chunk_ids = document_ids[i:i+4]
+                    chunk_attention_mask = document_attention_mask[i:i+4]
                     chunk_embeddings = model(
                         chunk_ids, 
                         document_attention_mask=chunk_attention_mask,
@@ -91,4 +91,9 @@ if __name__ == "__main__":
                 document_embeddings = torch.cat(document_embeddings, dim=0)
 
                 # store document embeddings
-                embedding_store.create_dataset(document, data=document_embeddings.cpu().numpy())
+                try:
+                    embedding_store.create_dataset(document, data=document_embeddings.cpu().numpy())
+                except Exception as e:
+                    print("Error while storing document embeddings:", e)
+                    print(f"{document_embeddings.shape=} \n Document: {document}")
+                    print("Skipping ...")
