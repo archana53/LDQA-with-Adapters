@@ -2,6 +2,7 @@ import argparse
 import os
 import h5py
 
+import torch
 from transformers import AutoTokenizer
 from tqdm import tqdm
 
@@ -39,6 +40,7 @@ if __name__ == "__main__":
     # set up EncoderOnly model
     model_config = EncoderOnlyModelConfig()
     model = EncoderOnlyModel(model_config, encoder)
+    model = model.to("cuda")
 
     muld_object = MuLD_Dataset(tokenizer=model_tokenizer, split=None, streaming=True, chunk_size=4096)
     train_dataset = muld_object.dataset["train"].map(muld_object.tokenize)
@@ -71,14 +73,22 @@ if __name__ == "__main__":
                 if document in embedding_store:
                     continue
 
-                document_ids = example["document_ids"]
-                document_attention_mask = example["document_attention_mask"]
+                document_ids = example["document_ids"].to("cuda")
+                document_attention_mask = example["document_attention_mask"].to("cuda")
                 global_attention_mask = None
-                document_embeddings = model(
-                    document_ids,
-                    document_attention_mask=document_attention_mask,
-                    global_attention_mask=global_attention_mask,
-                )
+
+                # iterate over chunks
+                document_embeddings = []
+                for i in range(document_ids.shape[0]):
+                    chunk_ids = document_ids[i].unsqueeze(0)
+                    chunk_attention_mask = document_attention_mask[i].unsqueeze(0)
+                    chunk_embeddings = model(
+                        chunk_ids, 
+                        document_attention_mask=chunk_attention_mask,
+                        global_attention_mask=global_attention_mask
+                    )
+                    document_embeddings.append(chunk_embeddings)
+                document_embeddings = torch.cat(document_embeddings, dim=0)
 
                 # store document embeddings
-                embedding_store.create_dataset(document, data=document_embeddings.numpy())
+                embedding_store.create_dataset(document, data=document_embeddings.cpu().numpy())
