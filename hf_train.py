@@ -10,7 +10,7 @@ from transformers import (
     get_scheduler,
 )
 
-from dataset import DataCollatorForLDQA, MuLD_Dataset
+from dataset import DataCollatorForLDQA, MuLD_Dataset, TweetQA_Dataset
 from encoder import EncoderType
 from model import LDQAModel, LDQAModelConfig
 from projection_heads import ProjectionHeadType
@@ -77,12 +77,28 @@ if __name__ == "__main__":
     lm_args = all_args["LM"]
     projection_args = all_args["Projection"]
 
+    model_tokenizer = AutoTokenizer.from_pretrained("allenai/led-base-16384")
+
+    tweetqa_object = TweetQA_Dataset(
+        tokenizer=model_tokenizer, split=None, streaming=True, chunk_size=4096
+    )
+    train_dataset = tweetqa_object.dataset["train"]
+    val_dataset = tweetqa_object.dataset["validation"]
+
+    data_collator = DataCollatorForLDQA(
+        tokenizer=model_tokenizer,
+        padding="max_length",
+        max_query_length=4096,
+        return_tensors="pt",
+    )
+
+
     # set up base-lm and document encoder
     model_original = LEDForConditionalGeneration.from_pretrained("allenai/led-base-16384")
     base_lm = LEDForConditionalGeneration(model_original.config, cross_attn_encoder=True)
     base_lm.load_state_dict(model_original.state_dict(), strict=False)
 
-    model_tokenizer = AutoTokenizer.from_pretrained("allenai/led-base-16384")
+    
     encoder_config = EncoderType[lm_args.encoder_type].value()
     encoder = encoder_config.get_model()
 
@@ -100,18 +116,6 @@ if __name__ == "__main__":
     model_config = LDQAModelConfig()
     model = LDQAModel(model_config, base_lm, encoder, projection_head)
 
-    muld_object = MuLD_Dataset(
-        tokenizer=model_tokenizer, split=None, streaming=True, chunk_size=4096
-    )
-    train_dataset = muld_object.dataset["train"]
-    val_dataset = muld_object.dataset["validation"]
-
-    data_collator = DataCollatorForLDQA(
-        tokenizer=model_tokenizer,
-        padding="max_length",
-        max_query_length=4096,
-        return_tensors="pt",
-    )
 
     total_steps = train_args.total_steps
     training_args = TrainingArguments(
@@ -133,7 +137,6 @@ if __name__ == "__main__":
             trainable_params.append(module.parameters())
 
     trainable_params = itertools.chain(*trainable_params)
-    print(trainable_params)
     optimizer = Adam(
         trainable_params, lr=train_args.lr, weight_decay=train_args.weight_decay
     )
