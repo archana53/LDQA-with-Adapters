@@ -6,7 +6,7 @@ import torch
 import torch.nn.functional as F
 from datasets import load_dataset, load_from_disk
 from transformers.tokenization_utils_base import PreTrainedTokenizerBase
-
+import preprocessor as tweet_preprocessor
 
 class HFDataset:
     def __init__(self, dataset_uuid=None, **kwargs):
@@ -15,7 +15,96 @@ class HFDataset:
     def get_dataset(self) -> dict:
         """Returns the corresponding dataset from huggingface"""
         raise NotImplementedError
+    
+class TweetQA_Dataset(HFDataset):
+    """HuggingFace TweetQA dataset
+    Downloads the dataset from HuggingFace or loads from disk
+    Keys in the example:
+        `query`: str
+        `document`: str
+        `label` [optional]: str
+        `query_ids`: torch.Tensor of shape (1, query_length)
+        `query_attention_mask`: torch.Tensor of shape (1, query_length)
+        `document_ids`: torch.Tensor of shape (1, num_chunks, chunk_size)
+        `document_attention_mask`: torch.Tensor of shape (1, num_chunks, chunk_size)
+        `label_ids`[optional]: torch.Tensor of shape (1, output_length)
+        `label_attention_mask` [optional]: torch.Tensor of shape (1, output_length)
+    """
 
+    def __init__(
+        self, tokenizer, split="train", chunk_size=4096, streaming=False, **kwargs
+    ):
+        super(TweetQA_Dataset, self).__init__(dataset_uuid="tweet_qa", **kwargs)
+        CACHE_PATH = "~/tweetqa_dataset"
+
+        try:
+            self.dataset = load_from_disk(CACHE_PATH)
+        except FileNotFoundError:
+            print("Dataset not found, loading from huggingface")
+            dataset = self.get_dataset(split=split, streaming=streaming)
+            dataset = dataset.remove_columns('qid')
+            dataset = dataset.rename_column("Question", "query")
+            dataset = dataset.rename_column("Answer", "label")
+            dataset = dataset.rename_column("Tweet", "document")
+            dataset = dataset.map(self.preprocess)
+
+            # dataset.save_to_disk(CACHE_PATH)  # TODO: unable to save IterableDataset
+            self.dataset = dataset
+
+        self.tokenizer = tokenizer
+        self.chunk_size = chunk_size
+
+    def get_dataset(self, split="train", streaming=False) -> dict:
+        dataset = load_dataset(
+            self.dataset_uuid, split=split, streaming=streaming
+        ).with_format("torch")
+        return dataset
+
+    def preprocess(self, example: dict) -> dict:
+        """Preprocess the dataset with basic cleanup and splitting into query and document"""
+        example['label'] = example['label'][0]
+        example['document'] = tweet_preprocessor.clean(example['document'])
+
+        return example
+    
+    def tokenize(self, example: dict) -> dict:
+        """Tokenize the dataset with the encoder tokenizer"""
+        tokenized_query = self.tokenizer(
+            example["query"],
+            padding=True,
+            truncation=False,
+            return_tensors=None,
+            pad_to_multiple_of=8,
+        )
+        tokenized_document = self.tokenizer(
+            example["document"],  # TODO: check if each chunk has a BOS token
+            padding=True,
+            truncation=True,
+            max_length=self.chunk_size,
+            return_tensors=None,
+            pad_to_multiple_of=8,
+            return_overflowing_tokens=True,
+        )
+
+        return_dict = {
+            "query_ids": tokenized_query.input_ids,
+            "query_attention_mask": tokenized_query.attention_mask,
+            "document_ids": tokenized_document.input_ids,
+            "document_attention_mask": tokenized_document.attention_mask,
+        }
+
+        if "label" in example:
+            tokenized_output = self.tokenizer(
+                example["label"],
+                padding=True,
+                truncation=False,
+                return_tensors=None,
+                pad_to_multiple_of=8,
+            )
+            return_dict["label_ids"] = tokenized_output.input_ids
+            return_dict["label_attention_mask"] = tokenized_output.attention_mask
+
+        return return_dict
 
 class MuLD_Dataset(HFDataset):
     """HuggingFace MuLD Dataset for NarrativeQA
@@ -138,6 +227,7 @@ class DataCollatorForLDQA:
                 for key in encoded_inputs[0].keys()
             }
 
+        print(encoded_inputs)
         tokenized_query = self.tokenizer(
             encoded_inputs["query"],
             padding=True,
