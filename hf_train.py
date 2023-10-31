@@ -1,7 +1,10 @@
 import argparse
 import itertools
 
-from torch.optim import Adam
+import evaluate
+import nltk
+import numpy as np
+from torch.optim import AdamW
 from transformers import (
     AutoTokenizer,
     LEDForConditionalGeneration,
@@ -27,6 +30,7 @@ def parse_args():
     train.add_argument("--warmup_steps", type=int, default=0)
     train.add_argument("--save_steps", type=int, default=1000)
     train.add_argument("--save_total_limit", type=int, default=2)
+    train.add_argument("--output_dir", type=str, default="./output")
 
     lm = parser.add_argument_group("LM")
     lm.add_argument(
@@ -79,9 +83,7 @@ if __name__ == "__main__":
 
     model_tokenizer = AutoTokenizer.from_pretrained("allenai/led-base-16384")
 
-    tweetqa_object = TweetQA_Dataset(
-        tokenizer=model_tokenizer, split=None, streaming=True, chunk_size=4096
-    )
+    tweetqa_object = TweetQA_Dataset(tokenizer=model_tokenizer, split=None, streaming=True, chunk_size=4096)
     train_dataset = tweetqa_object.dataset["train"]
     val_dataset = tweetqa_object.dataset["validation"]
 
@@ -92,13 +94,11 @@ if __name__ == "__main__":
         return_tensors="pt",
     )
 
-
     # set up base-lm and document encoder
     model_original = LEDForConditionalGeneration.from_pretrained("allenai/led-base-16384")
     base_lm = LEDForConditionalGeneration(model_original.config, cross_attn_encoder=True)
     base_lm.load_state_dict(model_original.state_dict(), strict=False)
 
-    
     encoder_config = EncoderType[lm_args.encoder_type].value()
     encoder = encoder_config.get_model()
 
@@ -116,30 +116,71 @@ if __name__ == "__main__":
     model_config = LDQAModelConfig()
     model = LDQAModel(model_config, base_lm, encoder, projection_head)
 
+    # set up generation config
+    generation_config = model_original.generation_config
+    generation_config.bos_token_id = model_tokenizer.bos_token_id
+
+    # set up metrics using huggingface evaluate
+    nltk.download("punkt", quiet=True)
+    metric = evaluate.combine(["rouge", "meteor", "bleu"])
+
+    def get_metrics(eval_prediction):
+        """Compute metrics: BLEU, ROUGE, METEOR and return a dictionary.
+        :param eval_prediction: instance of EvalPrediction with predictions and labels
+        :return: dictionary of metrics
+        """
+        preds, labels = eval_prediction
+
+        # decode preds and labels
+        labels = np.where(labels != -100, labels, model_tokenizer.pad_token_id)
+        decoded_preds = model_tokenizer.batch_decode(preds, skip_special_tokens=True)
+        decoded_labels = model_tokenizer.batch_decode(labels, skip_special_tokens=True)
+
+        # rougeLSum expects newline after each sentence
+        decoded_preds = ["\n".join(nltk.sent_tokenize(pred.strip())) for pred in decoded_preds]
+        decoded_labels = ["\n".join(nltk.sent_tokenize(label.strip())) for label in decoded_labels]
+
+        result = metric.compute(predictions=decoded_preds, references=decoded_labels, use_stemmer=True)
+        return result
 
     total_steps = train_args.total_steps
     training_args = TrainingArguments(
-        output_dir="./output",
+        output_dir=train_args.output_dir,
         num_train_epochs=3,  # Adjust based on your requirements
         per_device_train_batch_size=train_args.batch_size,
+        per_device_eval_batch_size=train_args.batch_size,
         save_steps=train_args.save_steps,
         save_total_limit=train_args.save_total_limit,
         max_steps=total_steps,
         remove_unused_columns=False,
+        logging_strategy="steps",
+        logging_steps=100,
+        dataloader_num_workers=4,
     )
 
     trainable_params = []
     trainable_mod_names = []
 
     # Only cross attention parameters trainable
+    trainable_param_count = 0
     for name, module in model.named_modules():
-        if "cross" in name:
+        if name.endswith("cross") or name.endswith("projection"):
+            print(name)
             trainable_params.append(module.parameters())
+            trainable_param_count += sum(p.numel() for p in module.parameters())
+
+    # print parameter summaries
+    print("-" * 48)
+    print("Parameter Summary".center(48, "-"))
+    print(f"Encoder parameters: {sum(p.numel() for p in encoder.parameters())}")
+    print(f"Base LM parameters: {sum(p.numel() for p in base_lm.parameters())}")
+    print(f"Projection head parameters: {sum(p.numel() for p in projection_head.parameters())}")
+    print(f"Trainable parameters: {trainable_param_count}")
+    print(f"Total parameters: {sum(p.numel() for p in model.parameters())}")
+    print("-" * 48)
 
     trainable_params = itertools.chain(*trainable_params)
-    optimizer = Adam(
-        trainable_params, lr=train_args.lr, weight_decay=train_args.weight_decay
-    )
+    optimizer = AdamW(trainable_params, lr=train_args.lr, weight_decay=train_args.weight_decay)
 
     lr_scheduler = get_scheduler(
         name="linear",
@@ -155,6 +196,8 @@ if __name__ == "__main__":
         eval_dataset=val_dataset,
         tokenizer=model_tokenizer,
         data_collator=data_collator,
+        optimizers=(optimizer, lr_scheduler),
+        # compute_metrics=get_metrics,  # TODO: set up evaluation
     )
 
     trainer.train()

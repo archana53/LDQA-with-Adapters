@@ -227,7 +227,6 @@ class DataCollatorForLDQA:
                 for key in encoded_inputs[0].keys()
             }
 
-        print(encoded_inputs)
         tokenized_query = self.tokenizer(
             encoded_inputs["query"],
             padding=True,
