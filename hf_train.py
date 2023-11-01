@@ -12,6 +12,7 @@ from transformers import (
     TrainingArguments,
     get_scheduler,
 )
+from typing import Optional
 
 from dataset import DataCollatorForLDQA, MuLD_Dataset, TweetQA_Dataset
 from encoder import EncoderType
@@ -23,7 +24,12 @@ def parse_args():
     parser = argparse.ArgumentParser()
 
     train = parser.add_argument_group("Training")
-    train.add_argument("--batch_size", type=int, default=1)
+    train.add_argument(
+        "--hdf5_path",
+        type=str,
+        default=None,
+    )
+    train.add_argument("--batch_size", type=int, default=2)
     train.add_argument("--total_steps", type=int, default=32000)
     train.add_argument("--lr", type=float, default=1e-3)
     train.add_argument("--weight_decay", type=float, default=0.01)
@@ -83,20 +89,27 @@ if __name__ == "__main__":
 
     model_tokenizer = AutoTokenizer.from_pretrained("allenai/led-base-16384")
 
-    tweetqa_object = TweetQA_Dataset(tokenizer=model_tokenizer, split=None, streaming=True, chunk_size=4096)
-    train_dataset = tweetqa_object.dataset["train"]
-    val_dataset = tweetqa_object.dataset["validation"]
+    dataset_object = MuLD_Dataset(
+        tokenizer=model_tokenizer, split=None, streaming=True, chunk_size=4096
+    )
+    train_dataset = dataset_object.dataset["train"]
+    val_dataset = dataset_object.dataset["validation"]
 
     data_collator = DataCollatorForLDQA(
         tokenizer=model_tokenizer,
         padding="max_length",
         max_query_length=4096,
         return_tensors="pt",
+        hdf5_file_path=train_args.hdf5_path,
     )
 
     # set up base-lm and document encoder
-    model_original = LEDForConditionalGeneration.from_pretrained("allenai/led-base-16384")
-    base_lm = LEDForConditionalGeneration(model_original.config, cross_attn_encoder=True)
+    model_original = LEDForConditionalGeneration.from_pretrained(
+        "allenai/led-base-16384"
+    )
+    base_lm = LEDForConditionalGeneration(
+        model_original.config, cross_attn_encoder=True
+    )
     base_lm.load_state_dict(model_original.state_dict(), strict=False)
 
     encoder_config = EncoderType[lm_args.encoder_type].value()
@@ -114,7 +127,12 @@ if __name__ == "__main__":
 
     # set up LDQA model
     model_config = LDQAModelConfig()
-    model = LDQAModel(model_config, base_lm, encoder, projection_head)
+    model = LDQAModel(
+        model_config,
+        base_lm,
+        encoder,
+        projection_head,
+    )
 
     # set up generation config
     generation_config = model_original.generation_config
@@ -137,10 +155,16 @@ if __name__ == "__main__":
         decoded_labels = model_tokenizer.batch_decode(labels, skip_special_tokens=True)
 
         # rougeLSum expects newline after each sentence
-        decoded_preds = ["\n".join(nltk.sent_tokenize(pred.strip())) for pred in decoded_preds]
-        decoded_labels = ["\n".join(nltk.sent_tokenize(label.strip())) for label in decoded_labels]
+        decoded_preds = [
+            "\n".join(nltk.sent_tokenize(pred.strip())) for pred in decoded_preds
+        ]
+        decoded_labels = [
+            "\n".join(nltk.sent_tokenize(label.strip())) for label in decoded_labels
+        ]
 
-        result = metric.compute(predictions=decoded_preds, references=decoded_labels, use_stemmer=True)
+        result = metric.compute(
+            predictions=decoded_preds, references=decoded_labels, use_stemmer=True
+        )
         return result
 
     total_steps = train_args.total_steps
@@ -174,13 +198,17 @@ if __name__ == "__main__":
     print("Parameter Summary".center(48, "-"))
     print(f"Encoder parameters: {sum(p.numel() for p in encoder.parameters())}")
     print(f"Base LM parameters: {sum(p.numel() for p in base_lm.parameters())}")
-    print(f"Projection head parameters: {sum(p.numel() for p in projection_head.parameters())}")
+    print(
+        f"Projection head parameters: {sum(p.numel() for p in projection_head.parameters())}"
+    )
     print(f"Trainable parameters: {trainable_param_count}")
     print(f"Total parameters: {sum(p.numel() for p in model.parameters())}")
     print("-" * 48)
 
     trainable_params = itertools.chain(*trainable_params)
-    optimizer = AdamW(trainable_params, lr=train_args.lr, weight_decay=train_args.weight_decay)
+    optimizer = AdamW(
+        trainable_params, lr=train_args.lr, weight_decay=train_args.weight_decay
+    )
 
     lr_scheduler = get_scheduler(
         name="linear",
