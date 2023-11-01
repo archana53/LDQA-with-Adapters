@@ -203,6 +203,7 @@ class MuLD_Dataset(HFDataset):
             "query_attention_mask": tokenized_query.attention_mask,
             "document_ids": tokenized_document.input_ids,
             "document_attention_mask": tokenized_document.attention_mask,
+            "document_outputs": document_outputs,
         }
 
         if "label" in example:
