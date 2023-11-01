@@ -6,7 +6,14 @@ import torch
 import torch.nn.functional as F
 from datasets import load_dataset, load_from_disk
 from transformers.tokenization_utils_base import PreTrainedTokenizerBase
+
+import h5py
+import torch
+from torch.utils.data import Dataset, DataLoader
 import preprocessor as tweet_preprocessor
+from copy import deepcopy
+from hashlib import sha256
+
 
 class HFDataset:
     def __init__(self, dataset_uuid=None, **kwargs):
@@ -15,7 +22,8 @@ class HFDataset:
     def get_dataset(self) -> dict:
         """Returns the corresponding dataset from huggingface"""
         raise NotImplementedError
-    
+
+
 class TweetQA_Dataset(HFDataset):
     """HuggingFace TweetQA dataset
     Downloads the dataset from HuggingFace or loads from disk
@@ -42,7 +50,7 @@ class TweetQA_Dataset(HFDataset):
         except FileNotFoundError:
             print("Dataset not found, loading from huggingface")
             dataset = self.get_dataset(split=split, streaming=streaming)
-            dataset = dataset.remove_columns('qid')
+            dataset = dataset.remove_columns("qid")
             dataset = dataset.rename_column("Question", "query")
             dataset = dataset.rename_column("Answer", "label")
             dataset = dataset.rename_column("Tweet", "document")
@@ -62,11 +70,11 @@ class TweetQA_Dataset(HFDataset):
 
     def preprocess(self, example: dict) -> dict:
         """Preprocess the dataset with basic cleanup and splitting into query and document"""
-        example['label'] = example['label'][0]
-        example['document'] = tweet_preprocessor.clean(example['document'])
+        example["label"] = example["label"][0]
+        example["document"] = tweet_preprocessor.clean(example["document"])
 
         return example
-    
+
     def tokenize(self, example: dict) -> dict:
         """Tokenize the dataset with the encoder tokenizer"""
         tokenized_query = self.tokenizer(
@@ -106,6 +114,7 @@ class TweetQA_Dataset(HFDataset):
 
         return return_dict
 
+
 class MuLD_Dataset(HFDataset):
     """HuggingFace MuLD Dataset for NarrativeQA
     Downloads the dataset from HuggingFace or loads from disk
@@ -124,7 +133,13 @@ class MuLD_Dataset(HFDataset):
     """
 
     def __init__(
-        self, tokenizer, split="train", chunk_size=4096, streaming=False, **kwargs
+        self,
+        tokenizer,
+        split="train",
+        chunk_size=4096,
+        streaming=False,
+        hdf5_file_path=None,
+        **kwargs,
     ):
         super(MuLD_Dataset, self).__init__(dataset_uuid="ghomasHudson/muld", **kwargs)
         CACHE_PATH = "~/muld_dataset"
@@ -188,6 +203,7 @@ class MuLD_Dataset(HFDataset):
             "query_attention_mask": tokenized_query.attention_mask,
             "document_ids": tokenized_document.input_ids,
             "document_attention_mask": tokenized_document.attention_mask,
+            "document_outputs": document_outputs,
         }
 
         if "label" in example:
@@ -204,14 +220,26 @@ class MuLD_Dataset(HFDataset):
         return return_dict
 
 
-@dataclass
 class DataCollatorForLDQA:
-    tokenizer: PreTrainedTokenizerBase
-    padding: Union[bool, str] = True
-    max_query_length: Optional[int] = None
-    pad_to_multiple_of: Optional[int] = None
-    label_pad_token_id: int = -100
-    return_tensors: str = "pt"
+    def __init__(
+        self,
+        tokenizer: PreTrainedTokenizerBase,
+        padding: Union[bool, str] = True,
+        max_query_length: Optional[int] = None,
+        pad_to_multiple_of: Optional[int] = None,
+        label_pad_token_id: int = -100,
+        return_tensors: str = "pt",
+        hdf5_file_path=None,
+    ):
+        self.tokenizer = tokenizer
+        self.padding = padding
+        self.max_query_length = max_query_length
+        self.pad_to_multiple_of = pad_to_multiple_of
+        self.label_pad_token_id = label_pad_token_id
+        self.return_tensors = return_tensors
+        # Open the hdf5 file in read-only mode
+        self.hdf5_file_path = hdf5_file_path
+        self.max_chunks_for_doc = 150
 
     def __call__(self, encoded_inputs, return_tensors=None):
         if return_tensors is None:
@@ -236,35 +264,48 @@ class DataCollatorForLDQA:
         )
         query_ids = tokenized_query.input_ids
         query_attention_mask = tokenized_query.attention_mask
-
-        tokenized_document = self.tokenizer(
-            encoded_inputs["document"],  # TODO: check if each chunk has a BOS token
-            padding=True,
-            truncation=True,
-            max_length=4096,
-            return_tensors="pt",
-            pad_to_multiple_of=8,
-            return_overflowing_tokens=True,
-        )
-        document_ids = tokenized_document.input_ids
-        document_attention_mask = tokenized_document.attention_mask
-
-        # tokenizer returns a list of shape ~(batch_size * num_chunks, chunk_size)
-        # reshape tokenized_document to (batch_size, max_num_chunks, chunk_size)
-        # using overflow_to_sample_mapping
-        # Note that num_chunks is not constant for all samples in the batch
-        document_ids, document_attention_mask = self._reshape_tokenized_document(
-            document_ids,
-            document_attention_mask,
-            tokenized_document.overflow_to_sample_mapping,
-        )
-
         batch = {
             "query_ids": query_ids,
             "query_attention_mask": query_attention_mask,
-            "document_ids": document_ids,
-            "document_attention_mask": document_attention_mask,
         }
+
+        document_outputs = torch.zeros(1)
+        document_ids = torch.zeros(1)
+        document_attention_mask = torch.zeros(1)
+
+        if self.hdf5_file_path:
+            with h5py.File(self.hdf5_file_path, "r", swmr=True) as f:
+                all_document_outputs = []
+                for docs in encoded_inputs["document"]:
+                    key = sha256(docs.encode("utf-8")).hexdigest()
+                    doc_output = torch.Tensor(f[key][...])
+                    reshaped_doc_output = self._reshape_encoded_document(doc_output)
+                    all_document_outputs.append(reshaped_doc_output.unsqueeze(0))
+                all_document_outputs = torch.concat(all_document_outputs, dim=0)
+                batch["document_encoding_outputs"] = all_document_outputs
+        else:
+            tokenized_document = self.tokenizer(
+                encoded_inputs["document"],  # TODO: check if each chunk has a BOS token
+                padding=True,
+                truncation=True,
+                max_length=4096,
+                return_tensors="pt",
+                pad_to_multiple_of=8,
+                return_overflowing_tokens=True,
+            )
+            document_ids = tokenized_document.input_ids
+            document_attention_mask = tokenized_document.attention_mask
+            # tokenizer returns a list of shape ~(batch_size * num_chunks, chunk_size)
+            # reshape tokenized_document to (batch_size, max_num_chunks, chunk_size)
+            # using overflow_to_sample_mapping
+            # Note that num_chunks is not constant for all samples in the batch
+            document_ids, document_attention_mask = self._reshape_tokenized_document(
+                document_ids,
+                document_attention_mask,
+                tokenized_document.overflow_to_sample_mapping,
+            )
+            batch["document_ids"] = document_ids
+            batch["document_attention_mask"] = document_attention_mask
 
         if "label" in encoded_inputs:
             tokenized_output = self.tokenizer(
@@ -279,6 +320,21 @@ class DataCollatorForLDQA:
             label_ids[label_ids == self.tokenizer.pad_token_id] = -100
             batch["label_ids"] = label_ids
         return batch
+
+    def _reshape_encoded_document(self, document_outputs):
+        num_chunks = document_outputs.shape[0]
+        # change size of document_outputs to (batch_size, max_chunks, context_length, hidden_size) by adding random values in that place
+        if document_outputs.shape[0] < self.max_chunks_for_doc:
+            padding = torch.zeros(
+                (
+                    self.max_chunks_for_doc - document_outputs.shape[0],
+                    document_outputs.shape[1],
+                    document_outputs.shape[2],
+                ),
+                device=document_outputs.device,
+            )
+            document_outputs = torch.cat((document_outputs, padding), dim=0)
+        return document_outputs
 
     def _reshape_tokenized_document(
         self,
