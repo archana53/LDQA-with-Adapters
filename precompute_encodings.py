@@ -2,6 +2,8 @@ import argparse
 import os
 import h5py
 
+from hashlib import sha256
+
 import torch
 from transformers import AutoTokenizer
 from tqdm import tqdm
@@ -69,8 +71,11 @@ if __name__ == "__main__":
             for example in tqdm(dataset):
                 document = example["document"]
 
+                # generate hash for the document
+                document_hash = sha256(document.encode("utf-8")).hexdigest()
+
                 # skip if document already in embedding store
-                if document in embedding_store:
+                if document_hash in embedding_store:
                     continue
 
                 document_ids = example["document_ids"].to("cuda")
@@ -92,8 +97,8 @@ if __name__ == "__main__":
 
                 # store document embeddings
                 try:
-                    embedding_store.create_dataset(document, data=document_embeddings.cpu().numpy())
+                    embedding_store.create_dataset(document_hash, data=document_embeddings.cpu().numpy())
                 except Exception as e:
                     print("Error while storing document embeddings:", e)
-                    print(f"{document_embeddings.shape=} \n Document: {document}")
+                    print(f"{document_embeddings.shape=}")
                     print("Skipping ...")
