@@ -8,8 +8,8 @@ from torch.optim import AdamW
 from transformers import (
     AutoTokenizer,
     LEDForConditionalGeneration,
-    Trainer,
-    TrainingArguments,
+    Seq2SeqTrainer,
+    Seq2SeqTrainingArguments,
     get_scheduler,
 )
 from typing import Optional
@@ -104,12 +104,8 @@ if __name__ == "__main__":
     )
 
     # set up base-lm and document encoder
-    model_original = LEDForConditionalGeneration.from_pretrained(
-        "allenai/led-base-16384"
-    )
-    base_lm = LEDForConditionalGeneration(
-        model_original.config, cross_attn_encoder=True
-    )
+    model_original = LEDForConditionalGeneration.from_pretrained("allenai/led-base-16384")
+    base_lm = LEDForConditionalGeneration(model_original.config, cross_attn_encoder=True)
     base_lm.load_state_dict(model_original.state_dict(), strict=False)
 
     encoder_config = EncoderType[lm_args.encoder_type].value()
@@ -139,15 +135,16 @@ if __name__ == "__main__":
     generation_config.bos_token_id = model_tokenizer.bos_token_id
 
     # set up metrics using huggingface evaluate
-    nltk.download("punkt", quiet=True)
-    metric = evaluate.combine(["rouge", "meteor", "bleu"])
+    meteor = evaluate.load("meteor")
+    rouge = evaluate.load("rouge")
+    bleu = evaluate.load("bleu")
 
     def get_metrics(eval_prediction):
         """Compute metrics: BLEU, ROUGE, METEOR and return a dictionary.
         :param eval_prediction: instance of EvalPrediction with predictions and labels
         :return: dictionary of metrics
         """
-        preds, labels = eval_prediction
+        preds, labels = eval_prediction.predictions, eval_prediction.label_ids
 
         # decode preds and labels
         labels = np.where(labels != -100, labels, model_tokenizer.pad_token_id)
@@ -155,20 +152,19 @@ if __name__ == "__main__":
         decoded_labels = model_tokenizer.batch_decode(labels, skip_special_tokens=True)
 
         # rougeLSum expects newline after each sentence
-        decoded_preds = [
-            "\n".join(nltk.sent_tokenize(pred.strip())) for pred in decoded_preds
-        ]
-        decoded_labels = [
-            "\n".join(nltk.sent_tokenize(label.strip())) for label in decoded_labels
-        ]
+        decoded_preds = ["\n".join(nltk.sent_tokenize(pred.strip())) for pred in decoded_preds]
+        decoded_labels = ["\n".join(nltk.sent_tokenize(label.strip())) for label in decoded_labels]
 
-        result = metric.compute(
-            predictions=decoded_preds, references=decoded_labels, use_stemmer=True
-        )
-        return result
+        rouge_score = rouge.compute(predictions=decoded_preds, references=decoded_labels, use_stemmer=True)
+        bleu_score = bleu.compute(predictions=decoded_preds, references=decoded_labels)
+        meteor_score = meteor.compute(predictions=decoded_preds, references=decoded_labels)
+
+        # combine all metrics into one dictionary
+        results = {k: v for score_dict in [rouge_score, bleu_score, meteor_score] for k, v in score_dict.items()}
+        return results
 
     total_steps = train_args.total_steps
-    training_args = TrainingArguments(
+    training_args = Seq2SeqTrainingArguments(
         output_dir=train_args.output_dir,
         num_train_epochs=3,  # Adjust based on your requirements
         per_device_train_batch_size=train_args.batch_size,
@@ -180,35 +176,37 @@ if __name__ == "__main__":
         logging_strategy="steps",
         logging_steps=100,
         dataloader_num_workers=4,
+        evaluation_strategy="steps",
+        predict_with_generate=True,
+        eval_steps=1000,
     )
 
     trainable_params = []
     trainable_mod_names = []
 
-    # Only cross attention parameters trainable
+    # Only cross attention and projection parameters trainable
+    print("-" * 48)
+    print("Trainable Parameters".center(48, "-"))
     trainable_param_count = 0
     for name, module in model.named_modules():
         if name.endswith("cross") or name.endswith("projection"):
             print(name)
             trainable_params.append(module.parameters())
             trainable_param_count += sum(p.numel() for p in module.parameters())
+    print("-" * 48)
 
     # print parameter summaries
     print("-" * 48)
     print("Parameter Summary".center(48, "-"))
     print(f"Encoder parameters: {sum(p.numel() for p in encoder.parameters())}")
     print(f"Base LM parameters: {sum(p.numel() for p in base_lm.parameters())}")
-    print(
-        f"Projection head parameters: {sum(p.numel() for p in projection_head.parameters())}"
-    )
+    print(f"Projection head parameters: {sum(p.numel() for p in projection_head.parameters())}")
     print(f"Trainable parameters: {trainable_param_count}")
     print(f"Total parameters: {sum(p.numel() for p in model.parameters())}")
     print("-" * 48)
 
     trainable_params = itertools.chain(*trainable_params)
-    optimizer = AdamW(
-        trainable_params, lr=train_args.lr, weight_decay=train_args.weight_decay
-    )
+    optimizer = AdamW(trainable_params, lr=train_args.lr, weight_decay=train_args.weight_decay)
 
     lr_scheduler = get_scheduler(
         name="linear",
@@ -217,7 +215,7 @@ if __name__ == "__main__":
         num_training_steps=total_steps,
     )
 
-    trainer = Trainer(
+    trainer = Seq2SeqTrainer(
         model,
         training_args,
         train_dataset=train_dataset,
@@ -225,7 +223,7 @@ if __name__ == "__main__":
         tokenizer=model_tokenizer,
         data_collator=data_collator,
         optimizers=(optimizer, lr_scheduler),
-        # compute_metrics=get_metrics,  # TODO: set up evaluation
+        compute_metrics=get_metrics,
     )
 
     trainer.train()
