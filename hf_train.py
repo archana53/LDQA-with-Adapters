@@ -178,6 +178,7 @@ if __name__ == "__main__":
         dataloader_num_workers=4,
         evaluation_strategy="steps",
         predict_with_generate=True,
+        report_to="wandb",
         eval_steps=1000,
     )
 
