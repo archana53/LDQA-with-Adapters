@@ -317,7 +317,7 @@ class DataCollatorForLDQA:
             label_ids = tokenized_output.input_ids
             # ignore the padding tokens
             label_ids[label_ids == self.tokenizer.pad_token_id] = -100
-            batch["label_ids"] = label_ids
+            batch["labels"] = label_ids
         return batch
 
     def _reshape_encoded_document(self, document_outputs):
