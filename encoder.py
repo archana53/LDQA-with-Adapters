@@ -32,14 +32,14 @@ class LongformerEncoderConfig(EncoderConfig):
 
 @dataclass
 class LongT5EncoderConfig(EncoderConfig):
-    model_id = "google/long-t5-local-base"
-    tokenizer_id = "google/long-t5-local-base"
+    model_id: str = "google/long-t5-local-base"
+    tokenizer_id: str = "google/long-t5-local-base"
 
 
 @dataclass
 class LLaMaEncoderConfig(EncoderConfig):
-    model_id = "meta-llama/Llama-2-7b-hf"
-    tokenizer_id = "meta-llama/Llama-2-7b-hf"
+    model_id: str = "meta-llama/Llama-2-7b-hf"
+    tokenizer_id: str = "meta-llama/Llama-2-7b-hf"
 
 
 class EncoderType(Enum):
