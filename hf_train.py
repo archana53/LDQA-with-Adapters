@@ -156,8 +156,16 @@ if __name__ == "__main__":
         decoded_labels = ["\n".join(nltk.sent_tokenize(label.strip())) for label in decoded_labels]
 
         rouge_score = rouge.compute(predictions=decoded_preds, references=decoded_labels, use_stemmer=True)
-        bleu_score = bleu.compute(predictions=decoded_preds, references=decoded_labels)
         meteor_score = meteor.compute(predictions=decoded_preds, references=decoded_labels)
+
+        # for bleu convert the references to a list of lists
+        decoded_labels = [[label] for label in decoded_labels]
+        bleu_score = bleu.compute(predictions=decoded_preds, references=decoded_labels)
+        # expand n-gram precisions list to a dictionary
+        bleu_score.update({f"precision_{i}": score for i, score in enumerate(bleu_score["precisions"])})
+        del bleu_score["precisions"]
+        # prefix all keys with bleu
+        bleu_score = {f"bleu_{k}": v for k, v in bleu_score.items()}
 
         # combine all metrics into one dictionary
         results = {k: v for score_dict in [rouge_score, bleu_score, meteor_score] for k, v in score_dict.items()}
@@ -168,7 +176,7 @@ if __name__ == "__main__":
         output_dir=train_args.output_dir,
         num_train_epochs=3,  # Adjust based on your requirements
         per_device_train_batch_size=train_args.batch_size,
-        per_device_eval_batch_size=train_args.batch_size,
+        per_device_eval_batch_size=1,
         save_steps=train_args.save_steps,
         save_total_limit=train_args.save_total_limit,
         max_steps=total_steps,
