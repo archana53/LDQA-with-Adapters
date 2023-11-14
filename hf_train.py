@@ -1,6 +1,7 @@
 import argparse
 import itertools
 
+import wandb
 import evaluate
 import nltk
 import numpy as np
@@ -82,6 +83,7 @@ def print_args(**kwargs):
 if __name__ == "__main__":
     # parse arguments and print to console
     all_args = parse_args()
+    wandb.init(project="huggingface", entity="adv-nlp-ldqa", config=all_args)
     print_args(**all_args)
     train_args = all_args["Training"]
     lm_args = all_args["LM"]
