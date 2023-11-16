@@ -54,7 +54,7 @@ def parse_args():
         "--proj_type",
         type=str,
         default="AvgPool",
-        choices=["AvgPool", "MaxPool", "Attention", "QueryAware"],
+        choices=["AvgPool", "MaxPool", "Linear", "Attention", "QueryAware"],
     )
     args = parser.parse_args()
 
