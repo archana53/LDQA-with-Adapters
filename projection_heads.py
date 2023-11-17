@@ -132,7 +132,7 @@ class MaxPoolProjectionHead(nn.Module):
         self.output_dim = output_dim
         self.projection = nn.Linear(self.input_dim, self.output_dim)
 
-    def forward(self, x):
+    def forward(self, x, **kwargs):
         x = x.max(dim=2)[0]
         x = self.projection(x)
         return x
@@ -147,7 +147,7 @@ class LinearProjectionHead(nn.Module):
         self.output_dim = output_dim
         self.projection = nn.Linear(self.input_dim, self.output_dim)
 
-    def forward(self, x):
+    def forward(self, x, **kwargs):
         """Args:
         x: Document chunk embeddings of shape (batch_size, num_chunks, chunk_size, embedding_dim).
         Returns:
@@ -190,7 +190,7 @@ class AttentionProjectionHead(nn.Module):
         if use_projection:
             self.projection = nn.Linear(self.input_dim, self.output_dim)
 
-    def forward(self, x, x_mask=None):
+    def forward(self, x, x_mask=None, **kwargs):
         """Args:
         x: Document chunk embeddings of shape (batch_size, num_chunks, chunk_size, embedding_dim).
         x_mask: Binary attention mask for document chunk embeddings denoting padding tokens.
@@ -205,7 +205,7 @@ class AttentionProjectionHead(nn.Module):
 
         # create all-one x_mask if not provided
         if x_mask is None:
-            x_mask = torch.ones(x.shape[:3]).bool()
+            x_mask = torch.zeros(x.shape[:3], device=x.device).bool()
 
         # repeat x_mask to shape [batch_size * num_heads, num_chunks, chunk_size, chunk_size]
         # as MHA needs attention of shape [batch_size * num_heads, target_len, source_len]
@@ -286,7 +286,7 @@ class QueryAwareProjectionHead(nn.Module):
             vdim=key_dim,
         )
 
-    def forward(self, doc_emb, query_emb, doc_mask=None, query_mask=None):
+    def forward(self, doc_emb, query_emb, doc_mask=None, query_mask=None, **kwargs):
         # get shapes
         bs, num_chunks, chunk_size, emb_dim = doc_emb.shape
         _, query_size, _ = query_emb.shape
