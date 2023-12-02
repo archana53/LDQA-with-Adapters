@@ -117,7 +117,7 @@ class AvgPoolProjectionHead(nn.Module):
         self.output_dim = output_dim
         self.projection = nn.Linear(self.input_dim, self.output_dim)
 
-    def forward(self, x):
+    def forward(self, x, **kwargs):
         x = x.mean(dim=2)
         x = self.projection(x)
         return x
