@@ -268,40 +268,32 @@ class DataCollatorForLDQA:
         document_ids = torch.zeros(1)
         document_attention_mask = torch.zeros(1)
 
-        # TODO(fix): attention mask from tokenizer is required when padding long documents
-        # currently using ones_like as a placeholder which does not account for padding
-        # within a chunk. Refer to _reshape_tokenized_document for more details.
+        tokenized_document = self.tokenizer(
+            encoded_inputs["document"],  # TODO: check if each chunk has a BOS token
+            padding=True,
+            truncation=True,
+            max_length=4096,
+            return_tensors="pt",
+            pad_to_multiple_of=8,
+            return_overflowing_tokens=True,
+        )
+        document_ids = tokenized_document.input_ids
+        document_attention_mask = tokenized_document.attention_mask
+        # tokenizer returns a list of shape ~(batch_size * num_chunks, chunk_size)
+        # reshape tokenized_document to (batch_size, max_num_chunks, chunk_size)
+        # using overflow_to_sample_mapping
+        # Note that num_chunks is not constant for all samples in the batch
+        document_ids, document_attention_mask = self._reshape_tokenized_document(
+            document_ids,
+            document_attention_mask,
+            tokenized_document.overflow_to_sample_mapping,
+        )
+        batch["document_ids"] = document_ids
+        batch["document_attention_mask"] = document_attention_mask
 
         if self.hdf5_file_path:
-            (
-                document_encoding_outputs,
-                document_attention_mask,
-            ) = self._prepare_hdf5_outputs(encoded_inputs)
+            document_encoding_outputs = self._prepare_hdf5_outputs(encoded_inputs)
             batch["document_encoding_outputs"] = document_encoding_outputs
-            batch["document_attention_mask"] = document_attention_mask
-        else:
-            tokenized_document = self.tokenizer(
-                encoded_inputs["document"],  # TODO: check if each chunk has a BOS token
-                padding=True,
-                truncation=True,
-                max_length=4096,
-                return_tensors="pt",
-                pad_to_multiple_of=8,
-                return_overflowing_tokens=True,
-            )
-            document_ids = tokenized_document.input_ids
-            document_attention_mask = tokenized_document.attention_mask
-            # tokenizer returns a list of shape ~(batch_size * num_chunks, chunk_size)
-            # reshape tokenized_document to (batch_size, max_num_chunks, chunk_size)
-            # using overflow_to_sample_mapping
-            # Note that num_chunks is not constant for all samples in the batch
-            document_ids, document_attention_mask = self._reshape_tokenized_document(
-                document_ids,
-                document_attention_mask,
-                tokenized_document.overflow_to_sample_mapping,
-            )
-            batch["document_ids"] = document_ids
-            batch["document_attention_mask"] = document_attention_mask
 
         # expected shapes
         # document_ids: (batch_size, max_num_chunks, chunk_size)
@@ -322,9 +314,7 @@ class DataCollatorForLDQA:
             batch["labels"] = label_ids
         return batch
 
-    def _prepare_hdf5_outputs(
-        self, encoded_inputs: Dict
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    def _prepare_hdf5_outputs(self, encoded_inputs: Dict) -> torch.Tensor:
         """Given a batch of encoded inputs, loads their embeddings from the H5 file and returns
         Pads the embeddings appropriately as described below and return their attention masks
         1. If the document has only one chunk, pad the batch to max sequence length in batch.
@@ -337,8 +327,6 @@ class DataCollatorForLDQA:
         :return document_outputs: torch.Tensor of shape
         [batch_size, max_num_chunks, chunk_size, hidden_size] or
         [batch_size, 1, max_length_in_batch, hidden_size]
-        :return attention_mask: torch.Tensor of shape
-        [batch_size, max_num_chunks, chunk_size] or [batch_size, 1, max_length_in_batch]
         """
         with h5py.File(self.hdf5_file_path, "r", swmr=True) as f:
             all_document_outputs = []
@@ -346,16 +334,13 @@ class DataCollatorForLDQA:
                 key = sha256(docs.encode("utf-8")).hexdigest()
                 doc_output = torch.Tensor(f[key][...])
                 all_document_outputs.append(doc_output)
-            (
-                all_document_outputs,
-                all_document_attention_masks,
-            ) = self._reshape_encoded_documents(all_document_outputs)
+            all_document_outputs = self._reshape_encoded_documents(all_document_outputs)
 
-            return all_document_outputs, all_document_attention_masks
+            return all_document_outputs
 
     def _reshape_encoded_documents(
         self, document_outputs: List[torch.Tensor]
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         """Reshapes batch of encoded documents to (batch_size, max_num_chunks, chunk_size, hidden_size)
         if the document has multiple chunks else to
         (batch_size, 1, max_length_in_batch, hidden_size)
@@ -374,11 +359,6 @@ class DataCollatorForLDQA:
         # short document, pad to max sequence length in batch
         if self.max_chunks_for_doc == 1:
             document_outputs = [x.squeeze(0) for x in document_outputs]
-            attention_mask = torch.nn.utils.rnn.pad_sequence(
-                [torch.ones_like(x[:, 0]) for x in document_outputs],
-                batch_first=True,
-                padding_value=0,
-            )
             document_outputs = torch.nn.utils.rnn.pad_sequence(
                 document_outputs,
                 batch_first=True,
@@ -386,36 +366,27 @@ class DataCollatorForLDQA:
             )
 
             document_outputs = document_outputs.unsqueeze(1)
-            attention_mask = attention_mask.int().unsqueeze(1)
-            return document_outputs, attention_mask
+            return document_outputs
 
         # long document, pad to max_chunk_size
         else:
             padded_outputs = [self._pad_to_max_chunks(x) for x in document_outputs]
-            document_outputs = torch.stack([x[0] for x in padded_outputs], dim=0)
-            attention_mask = torch.stack([x[1] for x in padded_outputs], dim=0)
-            return document_outputs, attention_mask
+            document_outputs = torch.stack(padded_outputs, dim=0)
+            return document_outputs
 
-    def _pad_to_max_chunks(
-        self, document_outputs: List[torch.Tensor]
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    def _pad_to_max_chunks(self, document_outputs: List[torch.Tensor]) -> torch.Tensor:
         """Pads a single document embedding to max_chunks_for_doc chunks"""
         num_chunks = document_outputs.shape[0]
+        max_chunks_in_batch = max(x.shape[0] for x in document_outputs)
         # change size of document_outputs to (batch_size, max_chunks, context_length, hidden_size)
         # by adding zeros in that place
-        attention_mask = F.pad(
-            # TODO(fix): should be attention mask from tokenizer instead of ones_like
-            torch.ones_like(document_outputs[:, :, 0]),
-            (0, 0, 0, self.max_chunks_for_doc - num_chunks),
-            value=0,
-        )
         document_outputs = F.pad(
             document_outputs,
-            (0, 0, 0, 0, 0, self.max_chunks_for_doc - num_chunks),
+            (0, 0, 0, 0, 0, max_chunks_in_batch - num_chunks),
             value=self.tokenizer.pad_token_id,
         )
 
-        return document_outputs, attention_mask.int()
+        return document_outputs
 
     def _reshape_tokenized_document(
         self,

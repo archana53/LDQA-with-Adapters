@@ -81,7 +81,7 @@ def print_args(**kwargs):
 def setup_dataset(dataset_config, train_args, tokenizer):
     """Setup dataset object and data collator."""
     dataset_object = dataset_config["cls"](
-        tokenizer=tokenizer, split=None, streaming=False, chunk_size=4096
+        tokenizer=tokenizer, split=None, streaming=True, chunk_size=4096
     )
 
     train_dataset = dataset_object.dataset["train"]

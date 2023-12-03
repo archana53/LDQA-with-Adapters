@@ -8,7 +8,7 @@ DATASET_CONFIG = {
     },
     "MuLD": {
         "cls": MuLD_Dataset,
-        "max_chunks_for_doc": 150,
+        "max_chunks_for_doc": 142,
         "hdf5_path": "/coc/flash8/akutumbaka3/LDQA-with-Adapters/data/longformer_noglobal/embeddings.h5",
     },
 }
