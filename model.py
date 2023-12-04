@@ -3,7 +3,9 @@ import torch.nn as nn
 from transformers import PreTrainedModel, PretrainedConfig
 
 
-def shift_tokens_right(input_ids: torch.Tensor, pad_token_id: int, decoder_start_token_id: int):
+def shift_tokens_right(
+    input_ids: torch.Tensor, pad_token_id: int, decoder_start_token_id: int
+):
     """
     Shift input ids one token to the right.
     """
@@ -65,24 +67,14 @@ class LDQAModel(PreTrainedModel):
         # TODO: save document embeddings offline and load them here
         if document_encoding_outputs is None:
             # Document encoding are not already calculated
-            document_outputs = []
-            with torch.no_grad():
-                for i in range(document_ids.shape[1]):
-                    chunk_document_ids = document_ids[:, i]
-                    chunk_document_attention_mask = document_attention_mask[:, i]
-                    document_output = self.encoder(
-                        chunk_document_ids,
-                        attention_mask=chunk_document_attention_mask,
-                        global_attention_mask=global_attention_mask,
-                    )
-                    # document_output.last_hidden_state.shape = [batch_size, chunk_length, hidden_size]
-                    document_outputs.append(document_output.last_hidden_state)
-                document_outputs = torch.stack(document_outputs, dim=1)
+            document_outputs = self.encode_document(
+                document_ids, document_attention_mask, global_attention_mask
+            )
             # document_outputs.shape = [batch_size, num_chunks, chunk_length, hidden_size]
-        # pass encoded document to projection head
         else:
             document_outputs = document_encoding_outputs
 
+        # pass encoded document to projection head
         # shape of document_outputs before project_head = (batch_size, num_chunks, chunk_length, hidden_size)
         document_outputs = self.projection_head(document_outputs)
 
@@ -98,6 +90,31 @@ class LDQAModel(PreTrainedModel):
         )
 
         return base_lm_outputs
+
+    @torch.no_grad()
+    def encode_document(
+        self, document_ids, document_attention_mask, global_attention_mask
+    ):
+        """Encodes a document using the encoder and returns the document embeddings.
+        :param document_ids: torch.LongTensor of shape [batch_size, document_length]
+        :param document_attention_mask: torch.LongTensor of shape [batch_size, document_length]
+        :param global_attention_mask: torch.LongTensor of shape [batch_size, document_length]
+        :return: torch.FloatTensor of shape [batch_size, num_chunks, chunk_length, hidden_size]
+        """
+
+        document_outputs = []
+        for i in range(document_ids.shape[1]):
+            chunk_document_ids = document_ids[:, i]
+            chunk_document_attention_mask = document_attention_mask[:, i]
+            document_output = self.encoder(
+                chunk_document_ids,
+                attention_mask=chunk_document_attention_mask,
+                global_attention_mask=global_attention_mask,
+            )
+            # document_output.last_hidden_state.shape = [batch_size, chunk_length, hidden_size]
+            document_outputs.append(document_output.last_hidden_state)
+        document_outputs = torch.stack(document_outputs, dim=1)
+        return document_outputs
 
     def prepare_attention_mask(self, document_outputs):
         # Shape of document_outputs after pooling projection head  = (batch_size, num_chunks, hidden_size
@@ -125,19 +142,9 @@ class LDQAModel(PreTrainedModel):
     ):
         if document_encoding_outputs is None:
             # Document encoding are not already calculated
-            document_outputs = []
-            with torch.no_grad():
-                for i in range(document_ids.shape[1]):
-                    chunk_document_ids = document_ids[:, i]
-                    chunk_document_attention_mask = document_attention_mask[:, i]
-                    document_output = self.encoder(
-                        chunk_document_ids,
-                        attention_mask=chunk_document_attention_mask,
-                        global_attention_mask=global_attention_mask,
-                    )
-                    # document_output.last_hidden_state.shape = [batch_size, chunk_length, hidden_size]
-                    document_outputs.append(document_output.last_hidden_state)
-                document_outputs = torch.stack(document_outputs, dim=1)
+            document_outputs = self.encode_document(
+                document_ids, document_attention_mask, global_attention_mask
+            )
             # document_outputs.shape = [batch_size, num_chunks, chunk_length, hidden_size]
         else:
             document_outputs = document_encoding_outputs

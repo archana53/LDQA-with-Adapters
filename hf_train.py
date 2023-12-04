@@ -1,10 +1,6 @@
 import argparse
 import itertools
 
-import wandb
-import evaluate
-import nltk
-import numpy as np
 from torch.optim import AdamW
 from transformers import (
     AutoTokenizer,
@@ -13,10 +9,12 @@ from transformers import (
     Seq2SeqTrainingArguments,
     get_scheduler,
 )
-from typing import Optional
 
-from dataset import DataCollatorForLDQA, MuLD_Dataset, TweetQA_Dataset
+import wandb
+from configs import DATASET_CONFIG
+from dataset import DataCollatorForLDQA
 from encoder import EncoderType
+from metrics import MetricComputer
 from model import LDQAModel, LDQAModelConfig
 from projection_heads import ProjectionHeadType
 
@@ -26,10 +24,10 @@ def parse_args():
 
     train = parser.add_argument_group("Training")
     train.add_argument(
-        "--hdf5_path",
-        type=str,
-        default=None,
+        "--dataset", type=str, default="MuLD", choices=["MuLD", "TweetQA"]
     )
+    train.add_argument("--use_hdf5", action="store_true")
+    train.add_argument("--hdf5_path", type=str, default=None)
     train.add_argument("--batch_size", type=int, default=2)
     train.add_argument("--total_steps", type=int, default=32000)
     train.add_argument("--lr", type=float, default=1e-3)
@@ -80,6 +78,32 @@ def print_args(**kwargs):
         print("-" * 48)
 
 
+def setup_dataset(dataset_config, train_args, tokenizer):
+    """Setup dataset object and data collator."""
+    dataset_object = dataset_config["cls"](
+        tokenizer=tokenizer, split=None, streaming=True, chunk_size=4096
+    )
+
+    train_dataset = dataset_object.dataset["train"]
+    val_dataset = dataset_object.dataset["validation"]
+
+    hdf5_path = None
+    if train_args.use_hdf5:
+        # use hdf5 path from args if provided, else use the one from config
+        hdf5_path = train_args.hdf5_path or dataset_config["hdf5_path"]
+
+    data_collator = DataCollatorForLDQA(
+        tokenizer=tokenizer,
+        padding="max_length",
+        max_query_length=4096,
+        return_tensors="pt",
+        hdf5_file_path=hdf5_path,
+        max_chunks_for_doc=dataset_config["max_chunks_for_doc"],
+    )
+
+    return train_dataset, val_dataset, data_collator
+
+
 if __name__ == "__main__":
     # parse arguments and print to console
     all_args = parse_args()
@@ -91,23 +115,19 @@ if __name__ == "__main__":
 
     model_tokenizer = AutoTokenizer.from_pretrained("allenai/led-base-16384")
 
-    dataset_object = MuLD_Dataset(
-        tokenizer=model_tokenizer, split=None, streaming=True, chunk_size=4096
-    )
-    train_dataset = dataset_object.dataset["train"]
-    val_dataset = dataset_object.dataset["validation"]
-
-    data_collator = DataCollatorForLDQA(
-        tokenizer=model_tokenizer,
-        padding="max_length",
-        max_query_length=4096,
-        return_tensors="pt",
-        hdf5_file_path=train_args.hdf5_path,
+    # set up datasets and data collator
+    dataset_config = DATASET_CONFIG[train_args.dataset]
+    train_dataset, val_dataset, data_collator = setup_dataset(
+        dataset_config, train_args, model_tokenizer
     )
 
     # set up base-lm and document encoder
-    model_original = LEDForConditionalGeneration.from_pretrained("allenai/led-base-16384")
-    base_lm = LEDForConditionalGeneration(model_original.config, cross_attn_encoder=True)
+    model_original = LEDForConditionalGeneration.from_pretrained(
+        "allenai/led-base-16384"
+    )
+    base_lm = LEDForConditionalGeneration(
+        model_original.config, cross_attn_encoder=True
+    )
     base_lm.load_state_dict(model_original.state_dict(), strict=False)
 
     encoder_config = EncoderType[lm_args.encoder_type].value()
@@ -130,48 +150,12 @@ if __name__ == "__main__":
         base_lm,
         encoder,
         projection_head,
+        max_chunks_for_doc=dataset_config["max_chunks_for_doc"],
     )
 
     # set up generation config
     generation_config = model_original.generation_config
     generation_config.bos_token_id = model_tokenizer.bos_token_id
-
-    # set up metrics using huggingface evaluate
-    meteor = evaluate.load("meteor")
-    rouge = evaluate.load("rouge")
-    bleu = evaluate.load("bleu")
-
-    def get_metrics(eval_prediction):
-        """Compute metrics: BLEU, ROUGE, METEOR and return a dictionary.
-        :param eval_prediction: instance of EvalPrediction with predictions and labels
-        :return: dictionary of metrics
-        """
-        preds, labels = eval_prediction.predictions, eval_prediction.label_ids
-
-        # decode preds and labels
-        labels = np.where(labels != -100, labels, model_tokenizer.pad_token_id)
-        decoded_preds = model_tokenizer.batch_decode(preds, skip_special_tokens=True)
-        decoded_labels = model_tokenizer.batch_decode(labels, skip_special_tokens=True)
-
-        # rougeLSum expects newline after each sentence
-        decoded_preds = ["\n".join(nltk.sent_tokenize(pred.strip())) for pred in decoded_preds]
-        decoded_labels = ["\n".join(nltk.sent_tokenize(label.strip())) for label in decoded_labels]
-
-        rouge_score = rouge.compute(predictions=decoded_preds, references=decoded_labels, use_stemmer=True)
-        meteor_score = meteor.compute(predictions=decoded_preds, references=decoded_labels)
-
-        # for bleu convert the references to a list of lists
-        decoded_labels = [[label] for label in decoded_labels]
-        bleu_score = bleu.compute(predictions=decoded_preds, references=decoded_labels)
-        # expand n-gram precisions list to a dictionary
-        bleu_score.update({f"precision_{i}": score for i, score in enumerate(bleu_score["precisions"])})
-        del bleu_score["precisions"]
-        # prefix all keys with bleu
-        bleu_score = {f"bleu_{k}": v for k, v in bleu_score.items()}
-
-        # combine all metrics into one dictionary
-        results = {k: v for score_dict in [rouge_score, bleu_score, meteor_score] for k, v in score_dict.items()}
-        return results
 
     total_steps = train_args.total_steps
     training_args = Seq2SeqTrainingArguments(
@@ -211,13 +195,17 @@ if __name__ == "__main__":
     print("Parameter Summary".center(48, "-"))
     print(f"Encoder parameters: {sum(p.numel() for p in encoder.parameters())}")
     print(f"Base LM parameters: {sum(p.numel() for p in base_lm.parameters())}")
-    print(f"Projection head parameters: {sum(p.numel() for p in projection_head.parameters())}")
+    print(
+        f"Projection head parameters: {sum(p.numel() for p in projection_head.parameters())}"
+    )
     print(f"Trainable parameters: {trainable_param_count}")
     print(f"Total parameters: {sum(p.numel() for p in model.parameters())}")
     print("-" * 48)
 
     trainable_params = itertools.chain(*trainable_params)
-    optimizer = AdamW(trainable_params, lr=train_args.lr, weight_decay=train_args.weight_decay)
+    optimizer = AdamW(
+        trainable_params, lr=train_args.lr, weight_decay=train_args.weight_decay
+    )
 
     lr_scheduler = get_scheduler(
         name="linear",
@@ -234,7 +222,7 @@ if __name__ == "__main__":
         tokenizer=model_tokenizer,
         data_collator=data_collator,
         optimizers=(optimizer, lr_scheduler),
-        compute_metrics=get_metrics,
+        compute_metrics=MetricComputer(model_tokenizer),
     )
 
     trainer.train()

@@ -1,18 +1,13 @@
 import re
-from dataclasses import dataclass
-from typing import Optional, Tuple, Union
+from hashlib import sha256
+from typing import List, Optional, Tuple, Union, Dict
 
+import h5py
+import preprocessor as tweet_preprocessor
 import torch
 import torch.nn.functional as F
 from datasets import load_dataset, load_from_disk
 from transformers.tokenization_utils_base import PreTrainedTokenizerBase
-
-import h5py
-import torch
-from torch.utils.data import Dataset, DataLoader
-import preprocessor as tweet_preprocessor
-from copy import deepcopy
-from hashlib import sha256
 
 
 class HFDataset:
@@ -70,7 +65,8 @@ class TweetQA_Dataset(HFDataset):
 
     def preprocess(self, example: dict) -> dict:
         """Preprocess the dataset with basic cleanup and splitting into query and document"""
-        example["label"] = example["label"][0]
+        # test split does not have a label
+        example["label"] = None if not example["label"] else example["label"][0]
         example["document"] = tweet_preprocessor.clean(example["document"])
 
         return example
@@ -101,7 +97,7 @@ class TweetQA_Dataset(HFDataset):
             "document_attention_mask": tokenized_document.attention_mask,
         }
 
-        if "label" in example:
+        if "label" in example and example["label"] is not None:
             tokenized_output = self.tokenizer(
                 example["label"],
                 padding=True,
@@ -228,7 +224,8 @@ class DataCollatorForLDQA:
         pad_to_multiple_of: Optional[int] = None,
         label_pad_token_id: int = -100,
         return_tensors: str = "pt",
-        hdf5_file_path=None,
+        hdf5_file_path: str = None,
+        max_chunks_for_doc: int = 150,
     ):
         self.tokenizer = tokenizer
         self.padding = padding
@@ -236,9 +233,8 @@ class DataCollatorForLDQA:
         self.pad_to_multiple_of = pad_to_multiple_of
         self.label_pad_token_id = label_pad_token_id
         self.return_tensors = return_tensors
-        # Open the hdf5 file in read-only mode
         self.hdf5_file_path = hdf5_file_path
-        self.max_chunks_for_doc = 150
+        self.max_chunks_for_doc = max_chunks_for_doc
 
     def __call__(self, encoded_inputs, return_tensors=None):
         if return_tensors is None:
@@ -272,39 +268,37 @@ class DataCollatorForLDQA:
         document_ids = torch.zeros(1)
         document_attention_mask = torch.zeros(1)
 
+        tokenized_document = self.tokenizer(
+            encoded_inputs["document"],  # TODO: check if each chunk has a BOS token
+            padding=True,
+            truncation=True,
+            max_length=4096,
+            return_tensors="pt",
+            pad_to_multiple_of=8,
+            return_overflowing_tokens=True,
+        )
+        document_ids = tokenized_document.input_ids
+        document_attention_mask = tokenized_document.attention_mask
+        # tokenizer returns a list of shape ~(batch_size * num_chunks, chunk_size)
+        # reshape tokenized_document to (batch_size, max_num_chunks, chunk_size)
+        # using overflow_to_sample_mapping
+        # Note that num_chunks is not constant for all samples in the batch
+        document_ids, document_attention_mask = self._reshape_tokenized_document(
+            document_ids,
+            document_attention_mask,
+            tokenized_document.overflow_to_sample_mapping,
+        )
+        batch["document_ids"] = document_ids
+        batch["document_attention_mask"] = document_attention_mask
+
         if self.hdf5_file_path:
-            with h5py.File(self.hdf5_file_path, "r", swmr=True) as f:
-                all_document_outputs = []
-                for docs in encoded_inputs["document"]:
-                    key = sha256(docs.encode("utf-8")).hexdigest()
-                    doc_output = torch.Tensor(f[key][...])
-                    reshaped_doc_output = self._reshape_encoded_document(doc_output)
-                    all_document_outputs.append(reshaped_doc_output.unsqueeze(0))
-                all_document_outputs = torch.concat(all_document_outputs, dim=0)
-                batch["document_encoding_outputs"] = all_document_outputs
-        else:
-            tokenized_document = self.tokenizer(
-                encoded_inputs["document"],  # TODO: check if each chunk has a BOS token
-                padding=True,
-                truncation=True,
-                max_length=4096,
-                return_tensors="pt",
-                pad_to_multiple_of=8,
-                return_overflowing_tokens=True,
-            )
-            document_ids = tokenized_document.input_ids
-            document_attention_mask = tokenized_document.attention_mask
-            # tokenizer returns a list of shape ~(batch_size * num_chunks, chunk_size)
-            # reshape tokenized_document to (batch_size, max_num_chunks, chunk_size)
-            # using overflow_to_sample_mapping
-            # Note that num_chunks is not constant for all samples in the batch
-            document_ids, document_attention_mask = self._reshape_tokenized_document(
-                document_ids,
-                document_attention_mask,
-                tokenized_document.overflow_to_sample_mapping,
-            )
-            batch["document_ids"] = document_ids
-            batch["document_attention_mask"] = document_attention_mask
+            document_encoding_outputs = self._prepare_hdf5_outputs(encoded_inputs)
+            batch["document_encoding_outputs"] = document_encoding_outputs
+
+        # expected shapes
+        # document_ids: (batch_size, max_num_chunks, chunk_size)
+        # document_attention_mask: (batch_size, max_num_chunks, chunk_size)
+        # document_encoding_outputs: (batch_size, max_num_chunks, chunk_size, hidden_size)
 
         if "label" in encoded_inputs:
             tokenized_output = self.tokenizer(
@@ -320,19 +314,78 @@ class DataCollatorForLDQA:
             batch["labels"] = label_ids
         return batch
 
-    def _reshape_encoded_document(self, document_outputs):
-        num_chunks = document_outputs.shape[0]
-        # change size of document_outputs to (batch_size, max_chunks, context_length, hidden_size) by adding random values in that place
-        if document_outputs.shape[0] < self.max_chunks_for_doc:
-            padding = torch.zeros(
-                (
-                    self.max_chunks_for_doc - document_outputs.shape[0],
-                    document_outputs.shape[1],
-                    document_outputs.shape[2],
-                ),
-                device=document_outputs.device,
+    def _prepare_hdf5_outputs(self, encoded_inputs: Dict) -> torch.Tensor:
+        """Given a batch of encoded inputs, loads their embeddings from the H5 file and returns
+        Pads the embeddings appropriately as described below and return their attention masks
+        1. If the document has only one chunk, pad the batch to max sequence length in batch.
+        2. If the document has multiple chunks, pad the batch to max_chunks_for_doc chunks.
+
+        Args:
+        :param encoded_inputs: Dict containing the encoded inputs
+
+        Returns:
+        :return document_outputs: torch.Tensor of shape
+        [batch_size, max_num_chunks, chunk_size, hidden_size] or
+        [batch_size, 1, max_length_in_batch, hidden_size]
+        """
+        with h5py.File(self.hdf5_file_path, "r", swmr=True) as f:
+            all_document_outputs = []
+            for docs in encoded_inputs["document"]:
+                key = sha256(docs.encode("utf-8")).hexdigest()
+                doc_output = torch.Tensor(f[key][...])
+                all_document_outputs.append(doc_output)
+            all_document_outputs = self._reshape_encoded_documents(all_document_outputs)
+
+            return all_document_outputs
+
+    def _reshape_encoded_documents(
+        self, document_outputs: List[torch.Tensor]
+    ) -> torch.Tensor:
+        """Reshapes batch of encoded documents to (batch_size, max_num_chunks, chunk_size, hidden_size)
+        if the document has multiple chunks else to
+        (batch_size, 1, max_length_in_batch, hidden_size)
+
+        Args:
+        :param document_outputs: List of torch.Tensor of shape
+        [num_chunks, context_length, hidden_size]
+
+        Returns:
+        :return reshaped_encodings: torch.Tensor of shape
+        [batch_size, max_num_chunks, chunk_size, hidden_size]
+        :return attention_mask: torch.Tensor of shape
+        [batch_size, max_num_chunks, chunk_size]
+        """
+
+        # short document, pad to max sequence length in batch
+        if self.max_chunks_for_doc == 1:
+            document_outputs = [x.squeeze(0) for x in document_outputs]
+            document_outputs = torch.nn.utils.rnn.pad_sequence(
+                document_outputs,
+                batch_first=True,
+                padding_value=self.tokenizer.pad_token_id,
             )
-            document_outputs = torch.cat((document_outputs, padding), dim=0)
+
+            document_outputs = document_outputs.unsqueeze(1)
+            return document_outputs
+
+        # long document, pad to max_chunk_size
+        else:
+            padded_outputs = [self._pad_to_max_chunks(x) for x in document_outputs]
+            document_outputs = torch.stack(padded_outputs, dim=0)
+            return document_outputs
+
+    def _pad_to_max_chunks(self, document_outputs: List[torch.Tensor]) -> torch.Tensor:
+        """Pads a single document embedding to max_chunks_for_doc chunks"""
+        num_chunks = document_outputs.shape[0]
+        max_chunks_in_batch = max(x.shape[0] for x in document_outputs)
+        # change size of document_outputs to (batch_size, max_chunks, context_length, hidden_size)
+        # by adding zeros in that place
+        document_outputs = F.pad(
+            document_outputs,
+            (0, 0, 0, 0, 0, max_chunks_in_batch - num_chunks),
+            value=self.tokenizer.pad_token_id,
+        )
+
         return document_outputs
 
     def _reshape_tokenized_document(
