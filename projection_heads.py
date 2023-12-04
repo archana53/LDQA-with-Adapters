@@ -174,7 +174,7 @@ class AttentionProjectionHead(nn.Module):
     """
 
     def __init__(
-        self, input_dim, output_dim, num_heads=12, num_outputs=1, use_projection=True
+        self, input_dim, output_dim, num_heads=12, num_outputs=1, use_projection=False
     ):
         super().__init__()
         self.input_dim = input_dim
@@ -190,7 +190,7 @@ class AttentionProjectionHead(nn.Module):
         if use_projection:
             self.projection = nn.Linear(self.input_dim, self.output_dim)
 
-    def forward(self, x, x_mask=None, **kwargs):
+    def forward(self, x, x_mask=None, invert_mask=True, **kwargs):
         """Args:
         x: Document chunk embeddings of shape (batch_size, num_chunks, chunk_size, embedding_dim).
         x_mask: Binary attention mask for document chunk embeddings denoting padding tokens.
@@ -202,9 +202,12 @@ class AttentionProjectionHead(nn.Module):
         # TODO: check x_mask convention and compatibility with HuggingFace tokenizers
         # PyTorch requires 0 for to-attend tokens and 1 for not-to-attend tokens
         # HuggingFace tokenizers give 1 for to-attend tokens and 0 for not-to-attend tokens
-
-        # create all-one x_mask if not provided
-        if x_mask is None:
+        # breakpoint()
+        if x_mask is not None:
+            x_mask = x_mask.bool()
+            if invert_mask:
+                x_mask = ~x_mask
+        elif x_mask is None:  # create all-one x_mask if not provided
             x_mask = torch.zeros(x.shape[:3], device=x.device).bool()
 
         # repeat x_mask to shape [batch_size * num_heads, num_chunks, chunk_size, chunk_size]
@@ -213,7 +216,7 @@ class AttentionProjectionHead(nn.Module):
         x_mask = x_mask.repeat_interleave(self.num_heads, dim=0)
 
         # permute batch_size and num_chunks dimensions
-        x = x.permute(1, 0, 2, 3)
+        x = x.permute(1, 0, 2, 3)  # (num_chunks, batch_size, chunk_size, emb_dim)
         x_mask = x_mask.permute(1, 0, 2, 3)
 
         outputs = []
@@ -225,12 +228,30 @@ class AttentionProjectionHead(nn.Module):
         outputs = torch.stack(outputs, dim=0)
         outputs = outputs.permute(1, 0, 2, 3)
 
+        # if nan, print debug info
+        # found_nan = torch.isnan(outputs).any()
+        # if found_nan:
+        #     print("x", x)
+        #     print("x.shape", x.shape)
+        #     print("x_mask", x_mask)
+        #     print("x_mask.shape", x_mask.shape)
+        #     print("outputs", outputs)
+        #     print("outputs.shape", outputs.shape)
+
         # get num_outputs outputs per chunk
         outputs = outputs[:, :, : self.num_outputs, :]
-        outputs = outputs.view(x.shape[0], x.shape[1] * self.num_outputs, x.shape[3])
+        outputs = outputs.reshape(x.shape[1], x.shape[0] * self.num_outputs, x.shape[3])
+
+        # if found_nan:
+        #     print("outputs", outputs)
+        #     print("outputs.shape", outputs.shape)
 
         if self.use_projection:
             outputs = self.projection(outputs)
+
+        if torch.isnan(outputs).any():
+            print("outputs", outputs)
+            print("outputs.shape", outputs.shape)
 
         return outputs
 
