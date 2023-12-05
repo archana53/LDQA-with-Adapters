@@ -14,7 +14,13 @@ from transformers import (
 )
 from typing import Optional
 
-from dataset import DataCollatorForLDQA, MuLD_Dataset, TweetQA_Dataset
+from dataset import (
+    DataCollatorForLDQA,
+    MuLD_Dataset,
+    TweetQA_Dataset,
+    Squad_Dataset,
+    DataCollatorForContextualQA,
+)
 from encoder import EncoderType
 from model import LDQAModel, LDQAModelConfig
 from projection_heads import ProjectionHeadType
@@ -29,10 +35,11 @@ def parse_args():
         type=str,
         default=None,
     )
-    train.add_argument("--batch_size", type=int, default=2)
+    train.add_argument("--contextual_qa", action="store_true")
+    train.add_argument("--batch_size", type=int, default=16)
     train.add_argument("--total_steps", type=int, default=32000)
-    train.add_argument("--lr", type=float, default=1e-3)
-    train.add_argument("--weight_decay", type=float, default=0.01)
+    train.add_argument("--lr", type=float, default=5e-5)
+    train.add_argument("--weight_decay", type=float, default=0.05)
     train.add_argument("--warmup_steps", type=int, default=0)
     train.add_argument("--save_steps", type=int, default=1000)
     train.add_argument("--save_total_limit", type=int, default=2)
@@ -89,13 +96,16 @@ if __name__ == "__main__":
 
     model_tokenizer = AutoTokenizer.from_pretrained("allenai/led-base-16384")
 
-    dataset_object = MuLD_Dataset(
+    dataset_object = Squad_Dataset(
         tokenizer=model_tokenizer, split=None, streaming=True, chunk_size=4096
     )
     train_dataset = dataset_object.dataset["train"]
     val_dataset = dataset_object.dataset["validation"]
 
-    data_collator = DataCollatorForLDQA(
+    data_collator_cls = (
+        DataCollatorForContextualQA if train_args.contextual_qa else DataCollatorForLDQA
+    )
+    data_collator = data_collator_cls(
         tokenizer=model_tokenizer,
         padding="max_length",
         max_query_length=4096,
@@ -105,7 +115,9 @@ if __name__ == "__main__":
 
     # set up base-lm and document encoder
     model_original = LEDForConditionalGeneration.from_pretrained("allenai/led-base-16384")
-    base_lm = LEDForConditionalGeneration(model_original.config, cross_attn_encoder=True)
+    base_lm = LEDForConditionalGeneration(
+        model_original.config, cross_attn_encoder=not (train_args.contextual_qa)
+    )
     base_lm.load_state_dict(model_original.state_dict(), strict=False)
 
     encoder_config = EncoderType[lm_args.encoder_type].value()
@@ -123,11 +135,15 @@ if __name__ == "__main__":
 
     # set up LDQA model
     model_config = LDQAModelConfig()
-    model = LDQAModel(
-        model_config,
-        base_lm,
-        encoder,
-        projection_head,
+    model = (
+        LDQAModel(
+            model_config,
+            base_lm,
+            encoder,
+            projection_head,
+        )
+        if not train_args.contextual_qa
+        else model_original
     )
 
     # set up generation config
@@ -155,26 +171,34 @@ if __name__ == "__main__":
         decoded_preds = ["\n".join(nltk.sent_tokenize(pred.strip())) for pred in decoded_preds]
         decoded_labels = ["\n".join(nltk.sent_tokenize(label.strip())) for label in decoded_labels]
 
-        rouge_score = rouge.compute(predictions=decoded_preds, references=decoded_labels, use_stemmer=True)
+        rouge_score = rouge.compute(
+            predictions=decoded_preds, references=decoded_labels, use_stemmer=True
+        )
         meteor_score = meteor.compute(predictions=decoded_preds, references=decoded_labels)
 
         # for bleu convert the references to a list of lists
         decoded_labels = [[label] for label in decoded_labels]
         bleu_score = bleu.compute(predictions=decoded_preds, references=decoded_labels)
         # expand n-gram precisions list to a dictionary
-        bleu_score.update({f"precision_{i}": score for i, score in enumerate(bleu_score["precisions"])})
+        bleu_score.update(
+            {f"precision_{i}": score for i, score in enumerate(bleu_score["precisions"])}
+        )
         del bleu_score["precisions"]
         # prefix all keys with bleu
         bleu_score = {f"bleu_{k}": v for k, v in bleu_score.items()}
 
         # combine all metrics into one dictionary
-        results = {k: v for score_dict in [rouge_score, bleu_score, meteor_score] for k, v in score_dict.items()}
+        results = {
+            k: v
+            for score_dict in [rouge_score, bleu_score, meteor_score]
+            for k, v in score_dict.items()
+        }
         return results
 
     total_steps = train_args.total_steps
     training_args = Seq2SeqTrainingArguments(
         output_dir=train_args.output_dir,
-        num_train_epochs=3,  # Adjust based on your requirements
+        num_train_epochs=5,  # Adjust based on your requirements
         per_device_train_batch_size=train_args.batch_size,
         per_device_eval_batch_size=1,
         save_steps=train_args.save_steps,
@@ -187,6 +211,9 @@ if __name__ == "__main__":
         evaluation_strategy="steps",
         predict_with_generate=True,
         report_to="wandb",
+        run_name="squad_ft_longformer_contextualqa"
+        if train_args.contextual_qa
+        else "squad_ft_longformer_ldqa",
         eval_steps=1000,
     )
 
@@ -198,10 +225,10 @@ if __name__ == "__main__":
     print("Trainable Parameters".center(48, "-"))
     trainable_param_count = 0
     for name, module in model.named_modules():
-        if name.endswith("cross") or name.endswith("projection"):
-            print(name)
-            trainable_params.append(module.parameters())
-            trainable_param_count += sum(p.numel() for p in module.parameters())
+        # if name.endswith("cross") or name.endswith("projection"):
+        print(name)
+        trainable_params.append(module.parameters())
+        trainable_param_count += sum(p.numel() for p in module.parameters())
     print("-" * 48)
 
     # print parameter summaries
