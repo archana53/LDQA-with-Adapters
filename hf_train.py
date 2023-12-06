@@ -36,6 +36,7 @@ def parse_args():
     train.add_argument("--save_steps", type=int, default=1000)
     train.add_argument("--save_total_limit", type=int, default=2)
     train.add_argument("--output_dir", type=str, default="./output")
+    train.add_argument("--run_name", type=str, default=None)
 
     lm = parser.add_argument_group("LM")
     lm.add_argument(
@@ -81,7 +82,10 @@ def print_args(**kwargs):
 def setup_dataset(dataset_config, train_args, tokenizer):
     """Setup dataset object and data collator."""
     dataset_object = dataset_config["cls"](
-        tokenizer=tokenizer, split=None, streaming=True, chunk_size=4096
+        tokenizer=tokenizer,
+        split=None,
+        streaming=dataset_config["streaming"],
+        chunk_size=4096,
     )
 
     train_dataset = dataset_object.dataset["train"]
@@ -108,6 +112,8 @@ if __name__ == "__main__":
     # parse arguments and print to console
     all_args = parse_args()
     wandb.init(project="huggingface", entity="adv-nlp-ldqa", config=all_args)
+    if all_args["Training"].run_name is not None:
+        wandb.run.name = all_args["Training"].run_name
     print_args(**all_args)
     train_args = all_args["Training"]
     lm_args = all_args["LM"]
@@ -130,8 +136,11 @@ if __name__ == "__main__":
     )
     base_lm.load_state_dict(model_original.state_dict(), strict=False)
 
-    encoder_config = EncoderType[lm_args.encoder_type].value()
-    encoder = encoder_config.get_model()
+    if train_args.hdf5_path is None:
+        encoder_config = EncoderType[lm_args.encoder_type].value()
+        encoder = encoder_config.get_model()
+    else:
+        encoder = None
 
     # set up projection head
     projection_head_config = ProjectionHeadType[projection_args.proj_type].value
@@ -193,7 +202,8 @@ if __name__ == "__main__":
     # print parameter summaries
     print("-" * 48)
     print("Parameter Summary".center(48, "-"))
-    print(f"Encoder parameters: {sum(p.numel() for p in encoder.parameters())}")
+    if encoder is not None:
+        print(f"Encoder parameters: {sum(p.numel() for p in encoder.parameters())}")
     print(f"Base LM parameters: {sum(p.numel() for p in base_lm.parameters())}")
     print(
         f"Projection head parameters: {sum(p.numel() for p in projection_head.parameters())}"
