@@ -174,7 +174,12 @@ class AttentionProjectionHead(nn.Module):
     """
 
     def __init__(
-        self, input_dim, output_dim, num_heads=12, num_outputs=1, use_projection=False
+        self,
+        input_dim,
+        output_dim,
+        num_heads=12,
+        num_outputs=1,
+        use_projection=False,
     ):
         super().__init__()
         self.input_dim = input_dim
@@ -195,65 +200,72 @@ class AttentionProjectionHead(nn.Module):
         x: Document chunk embeddings of shape (batch_size, num_chunks, chunk_size, embedding_dim).
         x_mask: Binary attention mask for document chunk embeddings denoting padding tokens.
                 Shape (batch_size, num_chunks, chunk_size).
+        invert_mask: Whether to invert the mask. PyTorch requires 0 for to-attend tokens and 1 for not-to-attend tokens
+                        HuggingFace tokenizers give 1 for to-attend tokens and 0 for not-to-attend tokens
 
         Returns:
         x: Document chunk embeddings after self-attention of shape (batch_size, num_chunks * num_outputs, embedding_dim).
         """
-        # TODO: check x_mask convention and compatibility with HuggingFace tokenizers
-        # PyTorch requires 0 for to-attend tokens and 1 for not-to-attend tokens
-        # HuggingFace tokenizers give 1 for to-attend tokens and 0 for not-to-attend tokens
-        # breakpoint()
+        x_mask = self._get_attention_mask(x_mask, invert_mask=invert_mask)
+
+        # permute batch_size and num_chunks dimensions
+        x = x.permute(1, 0, 2, 3)
+        # x.shape: (num_chunks, batch_size, chunk_size, emb_dim)
+        x_mask = x_mask.permute(1, 0, 2, 3)
+        # x_mask.shape: (num_chunks, batch_size, chunk_size, chunk_size)
+
+        outputs = []
+        for x_chunk, x_mask_chunk in zip(x, x_mask):
+            x_chunk = self.attn(
+                x_chunk,
+                x_chunk,
+                x_chunk,
+                need_weights=False,
+                attn_mask=x_mask_chunk,
+            )[0]
+            outputs.append(x_chunk)
+        outputs = torch.stack(outputs, dim=0)
+        outputs = outputs.permute(1, 0, 2, 3)
+
+        # get num_outputs outputs per chunk
+        outputs = outputs[:, :, : self.num_outputs, :]
+        outputs = outputs.reshape(
+            x.shape[1], x.shape[0] * self.num_outputs, x.shape[3]
+        )
+
+        if self.use_projection:
+            outputs = self.projection(outputs)
+
+        return outputs
+
+    def _get_attention_mask(self, x_mask, invert_mask=True):
+        """Compute attention mask for projection head.
+        Args:
+            x_mask: Binary attention mask for document chunk embeddings denoting padding tokens.
+                    Shape (batch_size, num_chunks, chunk_size).
+            invert_mask: Whether to invert the mask. PyTorch requires 0 for to-attend tokens and 1 for not-to-attend tokens
+                            HuggingFace tokenizers give 1 for to-attend tokens and 0 for not-to-attend tokens
+        Returns:
+            attention_mask: Binary attention mask for projection head.
+                            Shape (batch_size, num_chunks, chunk_size, chunk_size).
+        """
         if x_mask is not None:
             x_mask = x_mask.bool()
             if invert_mask:
                 x_mask = ~x_mask
-        elif x_mask is None:  # create all-one x_mask if not provided
-            x_mask = torch.zeros(x.shape[:3], device=x.device).bool()
+        elif x_mask is None:  # create all-False x_mask if not provided
+            x_mask = torch.zeros(x.shape[:3]).bool()
 
         # repeat x_mask to shape [batch_size * num_heads, num_chunks, chunk_size, chunk_size]
         # as MHA needs attention of shape [batch_size * num_heads, target_len, source_len]
         x_mask = x_mask.unsqueeze(-1).repeat(1, 1, 1, x_mask.shape[-1])
         x_mask = x_mask.repeat_interleave(self.num_heads, dim=0)
 
-        # permute batch_size and num_chunks dimensions
-        x = x.permute(1, 0, 2, 3)  # (num_chunks, batch_size, chunk_size, emb_dim)
-        x_mask = x_mask.permute(1, 0, 2, 3)
+        # fill elements along the diagonal with False
+        # to avoid nan gradients due to self-attention
+        x_mask.diagonal(dim1=-2, dim2=-1).fill_(False)
 
-        outputs = []
-        for x_chunk, x_mask_chunk in zip(x, x_mask):
-            x_chunk = self.attn(
-                x_chunk, x_chunk, x_chunk, need_weights=False, attn_mask=x_mask_chunk
-            )[0]
-            outputs.append(x_chunk)
-        outputs = torch.stack(outputs, dim=0)
-        outputs = outputs.permute(1, 0, 2, 3)
-
-        # if nan, print debug info
-        # found_nan = torch.isnan(outputs).any()
-        # if found_nan:
-        #     print("x", x)
-        #     print("x.shape", x.shape)
-        #     print("x_mask", x_mask)
-        #     print("x_mask.shape", x_mask.shape)
-        #     print("outputs", outputs)
-        #     print("outputs.shape", outputs.shape)
-
-        # get num_outputs outputs per chunk
-        outputs = outputs[:, :, : self.num_outputs, :]
-        outputs = outputs.reshape(x.shape[1], x.shape[0] * self.num_outputs, x.shape[3])
-
-        # if found_nan:
-        #     print("outputs", outputs)
-        #     print("outputs.shape", outputs.shape)
-
-        if self.use_projection:
-            outputs = self.projection(outputs)
-
-        if torch.isnan(outputs).any():
-            print("outputs", outputs)
-            print("outputs.shape", outputs.shape)
-
-        return outputs
+        return x_mask
 
 
 class QueryAwareProjectionHead(nn.Module):
@@ -307,7 +319,9 @@ class QueryAwareProjectionHead(nn.Module):
             vdim=key_dim,
         )
 
-    def forward(self, doc_emb, query_emb, doc_mask=None, query_mask=None, **kwargs):
+    def forward(
+        self, doc_emb, query_emb, doc_mask=None, query_mask=None, **kwargs
+    ):
         # get shapes
         bs, num_chunks, chunk_size, emb_dim = doc_emb.shape
         _, query_size, _ = query_emb.shape
@@ -323,27 +337,33 @@ class QueryAwareProjectionHead(nn.Module):
         x = x.view(bs, num_chunks, chunk_size, emb_dim)
 
         # cross-attention on document chunks and query
-        cross_attn_mask = self.get_attention_mask(doc_mask, query_mask)
-        x = x.permute(1, 0, 2, 3)  # shape: (num_chunks, bs, chunk_size, emb_dim)
-        cross_attn_mask = cross_attn_mask.permute(
-            1, 0, 2, 3
-        )  # shape: (num_chunks, bs, chunk_size, query_size)
+        cross_attn_mask = self._get_attention_mask(doc_mask, query_mask)
+        x = x.permute(1, 0, 2, 3)
+        # x.shape: (num_chunks, bs, chunk_size, emb_dim)
+        cross_attn_mask = cross_attn_mask.permute(1, 0, 2, 3)
+        # cross_attn_mask.shape: (num_chunks, bs, chunk_size, query_size)
 
         outputs = []
         for x_chunk, mask_chunk in zip(x, cross_attn_mask):
             x_chunk = self.cross_attn(
-                query_emb, x_chunk, x_chunk, need_weights=False, attn_mask=mask_chunk
+                query_emb,
+                x_chunk,
+                x_chunk,
+                need_weights=False,
+                attn_mask=mask_chunk,
             )[0]
             outputs.append(x_chunk)
         x = torch.stack(outputs, dim=1)  # TODO: check stack dim
-        x = x.permute(1, 0, 2, 3)  # shape: (bs, num_chunks, chunk_size, emb_dim)
+        x = x.permute(
+            1, 0, 2, 3
+        )  # shape: (bs, num_chunks, chunk_size, emb_dim)
 
         # get outputs_per_chunk outputs per chunk
         x = x[:, :, : self.outputs_per_chunk, :]
         x = x.view(bs, num_chunks * self.outputs_per_chunk, emb_dim)
         return x
 
-    def get_attention_mask(self, doc_mask, query_mask):
+    def _get_attention_mask(self, doc_mask, query_mask):
         """Compute attention mask for query aware projection head.
         Args:
             doc_mask: Binary attention mask for document chunk embeddings denoting padding tokens.

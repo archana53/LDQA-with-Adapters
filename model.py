@@ -3,24 +3,6 @@ import torch.nn as nn
 from transformers import PreTrainedModel, PretrainedConfig
 
 
-def shift_tokens_right(
-    input_ids: torch.Tensor, pad_token_id: int, decoder_start_token_id: int
-):
-    """
-    Shift input ids one token to the right.
-    """
-    shifted_input_ids = input_ids.new_zeros(input_ids.shape)
-    shifted_input_ids[:, 1:] = input_ids[:, :-1].clone()
-    shifted_input_ids[:, 0] = decoder_start_token_id
-
-    if pad_token_id is None:
-        raise ValueError("config.pad_token_id has to be defined.")
-    # replace possible -100 values in labels by `pad_token_id`
-    shifted_input_ids.masked_fill_(shifted_input_ids == -100, pad_token_id)
-
-    return shifted_input_ids
-
-
 class LDQAModelConfig(PretrainedConfig):
     model_type = "LQDA"
 
@@ -32,7 +14,9 @@ class LDQAModelConfig(PretrainedConfig):
 class LDQAModel(PreTrainedModel):
     config_class = LDQAModelConfig
 
-    def __init__(self, config, base_lm, encoder, projection_head, max_chunks_for_doc=1):
+    def __init__(
+        self, config, base_lm, encoder, projection_head, max_chunks_for_doc=1
+    ):
         super().__init__(config)
         self.base_lm = base_lm
         self.encoder = encoder
@@ -77,11 +61,6 @@ class LDQAModel(PreTrainedModel):
         document_outputs = self.projection_head(
             document_outputs, x_mask=document_attention_mask
         )
-        # print info for debugging
-        print(document_outputs.shape)
-        print("abs min", torch.abs(document_outputs).min())
-        print("abs max", torch.abs(document_outputs).max())
-        print("is nan", torch.isnan(document_outputs).any())
 
         attention_mask = self._prepare_attention_mask(document_attention_mask)
 
@@ -132,10 +111,12 @@ class LDQAModel(PreTrainedModel):
         :return: torch.LongTensor of shape [batch_size, 1, 1, num_chunks]
         """
         cross_attn_attention_mask = document_attention_mask.any(dim=-1).long()
-        cross_attn_attention_mask = cross_attn_attention_mask.repeat_interleave(
-            repeat, dim=-1
+        cross_attn_attention_mask = (
+            cross_attn_attention_mask.repeat_interleave(repeat, dim=-1)
         )
-        cross_attn_attention_mask = cross_attn_attention_mask.unsqueeze(1).unsqueeze(2)
+        cross_attn_attention_mask = cross_attn_attention_mask.unsqueeze(
+            1
+        ).unsqueeze(2)
         return cross_attn_attention_mask
 
     def generate(
