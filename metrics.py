@@ -42,9 +42,6 @@ class MetricComputer:
             predictions=decoded_preds, references=decoded_labels
         )
 
-        # for bleu convert the references to a list of lists
-        decoded_labels = [[label] for label in decoded_labels]
-
         # combine all metrics into one dictionary
         results = {
             k: v

@@ -17,6 +17,7 @@ def parse_args():
     parser = argparse.ArgumentParser()
 
     parser.add_argument("--batch_size", type=int, default=2)
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=4)
     parser.add_argument("--total_steps", type=int, default=32000)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--weight_decay", type=float, default=0.01)
@@ -67,7 +68,7 @@ if __name__ == "__main__":
         model_tokenizer, args.debug
     )
     model = AutoModelForSeq2SeqLM.from_pretrained(
-        "allenai/led-base-16384", use_cache=True
+        "allenai/led-base-16384", use_cache=False, gradient_checkpointing=True
     )
 
     # set generate hyperparameters
@@ -90,17 +91,17 @@ if __name__ == "__main__":
         remove_unused_columns=True,
         logging_strategy="steps",
         logging_steps=100,
-        dataloader_num_workers=20,
+        dataloader_num_workers=4,
         fp16=True,  # fp16 training
         evaluation_strategy="steps",
         predict_with_generate=True,
         report_to="wandb",
-        eval_steps=1000,
+        eval_steps=500,
         learning_rate=args.lr,
         weight_decay=args.weight_decay,
         warmup_steps=args.warmup_steps,
-        gradient_accumulation_steps=1,
-        optim="adamw_apex_fused",
+        gradient_accumulation_steps=args.gradient_accumulation_steps,
+        optim="adamw_torch_fused",
     )
 
     trainer = Seq2SeqTrainer(
