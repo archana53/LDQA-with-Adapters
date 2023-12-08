@@ -35,7 +35,12 @@ class TweetQA_Dataset(HFDataset):
     """
 
     def __init__(
-        self, tokenizer, split="train", chunk_size=4096, streaming=False, **kwargs
+        self,
+        tokenizer,
+        split="train",
+        chunk_size=4096,
+        streaming=False,
+        **kwargs,
     ):
         super(TweetQA_Dataset, self).__init__(dataset_uuid="tweet_qa", **kwargs)
         CACHE_PATH = "~/tweetqa_dataset"
@@ -255,7 +260,6 @@ class SQuAD_Dataset(HFDataset):
             preprocess,
             batched=True,
             remove_columns=["id", "title", "context", "question", "answers"],
-            load_from_cache_file=False,
         )
 
         self.dataset = dataset
@@ -370,7 +374,10 @@ class DataCollatorForLDQA:
         # reshape tokenized_document to (batch_size, max_num_chunks, chunk_size)
         # using overflow_to_sample_mapping
         # Note that num_chunks is not constant for all samples in the batch
-        document_ids, document_attention_mask = self._reshape_tokenized_document(
+        (
+            document_ids,
+            document_attention_mask,
+        ) = self._reshape_tokenized_document(
             document_ids,
             document_attention_mask,
             tokenized_document.overflow_to_sample_mapping,

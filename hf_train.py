@@ -4,6 +4,7 @@ import itertools
 from torch.optim import AdamW
 from transformers import (
     AutoTokenizer,
+    AutoModelForSeq2SeqLM,
     LEDForConditionalGeneration,
     Seq2SeqTrainer,
     Seq2SeqTrainingArguments,
@@ -62,7 +63,11 @@ def parse_args():
     # split args into separate dicts
     arg_groups = {}
     for group in parser._action_groups:
-        if group.title in ["positional arguments", "optional arguments", "options"]:
+        if group.title in [
+            "positional arguments",
+            "optional arguments",
+            "options",
+        ]:
             continue
         group_dict = {a.dest: getattr(args, a.dest, None) for a in group._group_actions}
         arg_groups[group.title] = argparse.Namespace(**group_dict)
@@ -128,9 +133,7 @@ if __name__ == "__main__":
     )
 
     # set up base-lm and document encoder
-    model_original = LEDForConditionalGeneration.from_pretrained(
-        "allenai/led-base-16384"
-    )
+    model_original = AutoModelForSeq2SeqLM.from_pretrained("allenai/led-base-16384")
     base_lm = LEDForConditionalGeneration(
         model_original.config, cross_attn_encoder=True
     )
@@ -162,9 +165,13 @@ if __name__ == "__main__":
         max_chunks_for_doc=dataset_config["max_chunks_for_doc"],
     )
 
-    # set up generation config
-    generation_config = model_original.generation_config
-    generation_config.bos_token_id = model_tokenizer.bos_token_id
+    # set generate hyperparameters
+    model.config.num_beams = 4
+    model.config.max_length = 40
+    model.config.min_length = 2
+    model.config.length_penalty = 2.0
+    model.config.early_stopping = True
+    model.config.no_repeat_ngram_size = 3
 
     total_steps = train_args.total_steps
     training_args = Seq2SeqTrainingArguments(
@@ -193,7 +200,7 @@ if __name__ == "__main__":
     print("Trainable Parameters".center(48, "-"))
     trainable_param_count = 0
     for name, module in model.named_modules():
-        if name.endswith("cross") or name.endswith("projection"):
+        if name.endswith("cross") or name.startswith("projection_head"):
             print(name)
             trainable_params.append(module.parameters())
             trainable_param_count += sum(p.numel() for p in module.parameters())
@@ -214,7 +221,9 @@ if __name__ == "__main__":
 
     trainable_params = itertools.chain(*trainable_params)
     optimizer = AdamW(
-        trainable_params, lr=train_args.lr, weight_decay=train_args.weight_decay
+        trainable_params,
+        lr=train_args.lr,
+        weight_decay=train_args.weight_decay,
     )
 
     lr_scheduler = get_scheduler(
