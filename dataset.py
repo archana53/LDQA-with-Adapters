@@ -215,6 +215,93 @@ class MuLD_Dataset(HFDataset):
         return return_dict
 
 
+class SQuAD_Dataset(HFDataset):
+    """HuggingFace SQuAD Dataset for Abstractive QA
+    Downloads the dataset from HuggingFace or loads from disk
+    Preprocesses - cleans BOM and HTML tags, extra spaces and new lines; splits into query and document
+    Tokenizes the dataset with the given tokenizer; Does not chunk the document
+    Keys in the example:
+        `input`: str
+        `label` [optional]: str
+        `input_ids`: torch.Tensor of shape (1, input_length)
+        `input_attention_mask`: torch.Tensor of shape (1, input_length)
+        `labels`[optional]: torch.Tensor of shape (1, output_length)
+        `label_attention_mask` [optional]: torch.Tensor of shape (1, output_length)
+    """
+
+    def __init__(
+        self,
+        tokenizer,
+        split="train",
+        streaming=False,
+        mode="icl",
+        debug=False,
+        **kwargs,
+    ):
+        super(SQuAD_Dataset, self).__init__(dataset_uuid="squad", **kwargs)
+
+        if mode != "icl":
+            raise NotImplementedError("Only ICL mode is supported")
+
+        self.tokenizer = tokenizer
+        preprocess = self.preprocess_icl
+        dataset = self.get_dataset(split=split, streaming=streaming)
+        if debug:
+            dataset["train"] = dataset["train"].select(range(100))
+            dataset["validation"] = dataset["validation"].select(range(20))
+        for key, val in dataset.items():
+            dataset[key] = val.shuffle(seed=42)
+        dataset = dataset.map(
+            preprocess,
+            batched=True,
+            remove_columns=["id", "title", "context", "question", "answers"],
+            load_from_cache_file=False,
+        )
+
+        self.dataset = dataset
+
+    def get_dataset(self, split="train", streaming=False) -> dict:
+        dataset = load_dataset(
+            self.dataset_uuid, split=split, streaming=streaming
+        ).with_format("torch")
+        return dataset
+
+    def preprocess_icl(self, example: dict) -> dict:
+        """Preprocess the dataset with basic cleanup and splitting into query
+        and document"""
+
+        questions = [q.strip() for q in example["question"]]
+
+        formatted_texts = []
+        for context, question in zip(example["context"], questions):
+            formatted_texts.append(f"Context: {context} Question: {question}")
+
+        model_inputs = self.tokenizer(
+            formatted_texts,
+            max_length=384,
+            truncation=True,
+            return_offsets_mapping=False,
+            padding="max_length",
+        )
+
+        # create global_attention_mask lists with 1 at the first token
+        # of each question and 0 for the rest
+        global_attention_masks = []
+        for input_ids in model_inputs["input_ids"]:
+            global_attention_masks.append([1] + [0] * (len(input_ids) - 1))
+        model_inputs["global_attention_mask"] = global_attention_masks
+
+        text_target = ["Answer: " + answer["text"][0] for answer in example["answers"]]
+        labels = self.tokenizer(
+            text_target=text_target,
+            max_length=32,  # TODO: this is a guess
+            truncation=True,
+        )
+
+        model_inputs["labels"] = labels["input_ids"]
+        return model_inputs
+
+
 class DataCollatorForLDQA:
     def __init__(
         self,
