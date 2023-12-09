@@ -9,7 +9,7 @@ from transformers import (
 )
 
 import wandb
-from dataset import SQuAD_Dataset
+from configs import DATASET_CONFIG
 from metrics import MetricComputer
 
 
@@ -17,7 +17,10 @@ def parse_args():
     parser = argparse.ArgumentParser()
 
     parser.add_argument("--batch_size", type=int, default=2)
-    parser.add_argument("--gradient_accumulation_steps", type=int, default=4)
+    parser.add_argument(
+        "--dataset", type=str, default="SQuAD", choices=["TweetQA", "SQuAD"]
+    )
+    parser.add_argument("--grad_acc_steps", type=int, default=4)
     parser.add_argument("--total_steps", type=int, default=32000)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--weight_decay", type=float, default=0.01)
@@ -32,13 +35,10 @@ def parse_args():
     return args
 
 
-def setup_dataset(tokenizer, debug=False):
+def setup_dataset(dataset_config, tokenizer, debug=False):
     """Setup dataset object and data collator."""
-    dataset_object = SQuAD_Dataset(
-        tokenizer=tokenizer,
-        split=None,
-        streaming=False,
-        debug=debug,
+    dataset_object = dataset_config["cls"](
+        tokenizer=tokenizer, split=None, streaming=False, mode="icl"
     )
 
     train_dataset = dataset_object.dataset["train"]
@@ -64,8 +64,9 @@ if __name__ == "__main__":
     model_tokenizer = AutoTokenizer.from_pretrained("allenai/led-base-16384")
 
     # set up datasets and data collator
+    dataset_config = DATASET_CONFIG[args.dataset]
     train_dataset, val_dataset, data_collator = setup_dataset(
-        model_tokenizer, args.debug
+        dataset_config, model_tokenizer, args.debug
     )
     model = AutoModelForSeq2SeqLM.from_pretrained(
         "allenai/led-base-16384", use_cache=False, gradient_checkpointing=True
@@ -100,7 +101,7 @@ if __name__ == "__main__":
         learning_rate=args.lr,
         weight_decay=args.weight_decay,
         warmup_steps=args.warmup_steps,
-        gradient_accumulation_steps=args.gradient_accumulation_steps,
+        gradient_accumulation_steps=args.grad_acc_steps,
         optim="adamw_torch_fused",
     )
 

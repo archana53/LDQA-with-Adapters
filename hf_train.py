@@ -25,11 +25,12 @@ def parse_args():
 
     train = parser.add_argument_group("Training")
     train.add_argument(
-        "--dataset", type=str, default="MuLD", choices=["MuLD", "TweetQA"]
+        "--dataset", type=str, default="MuLD", choices=["MuLD", "TweetQA", "SQuAD"]
     )
     train.add_argument("--use_hdf5", action="store_true")
     train.add_argument("--hdf5_path", type=str, default=None)
     train.add_argument("--batch_size", type=int, default=2)
+    train.add_argument("--grad_acc_steps", type=int, default=4)
     train.add_argument("--total_steps", type=int, default=32000)
     train.add_argument("--lr", type=float, default=1e-3)
     train.add_argument("--weight_decay", type=float, default=0.01)
@@ -91,6 +92,7 @@ def setup_dataset(dataset_config, train_args, tokenizer):
         split=None,
         streaming=dataset_config["streaming"],
         chunk_size=4096,
+        mode="ldqa",
     )
 
     train_dataset = dataset_object.dataset["train"]
@@ -139,7 +141,7 @@ if __name__ == "__main__":
     )
     base_lm.load_state_dict(model_original.state_dict(), strict=False)
 
-    if train_args.hdf5_path is None:
+    if not train_args.use_hdf5:
         encoder_config = EncoderType[lm_args.encoder_type].value()
         encoder = encoder_config.get_model()
     else:
@@ -186,10 +188,12 @@ if __name__ == "__main__":
         logging_strategy="steps",
         logging_steps=100,
         dataloader_num_workers=4,
+        fp16=True,  # fp16 training
         evaluation_strategy="steps",
         predict_with_generate=True,
         report_to="wandb",
         eval_steps=1000,
+        gradient_accumulation_steps=train_args.grad_acc_steps,
     )
 
     trainable_params = []

@@ -1,83 +1,87 @@
 import re
 from hashlib import sha256
-from typing import List, Optional, Tuple, Union, Dict
+from typing import Dict, List, Optional, Tuple, Union
 
 import h5py
 import preprocessor as tweet_preprocessor
 import torch
 import torch.nn.functional as F
-from datasets import load_dataset, load_from_disk
+from datasets import load_dataset
 from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 
 
 class HFDataset:
-    def __init__(self, dataset_uuid=None, **kwargs):
+    def __init__(
+        self,
+        dataset_uuid=None,
+        name=None,
+        tokenizer=None,
+        max_length=None,
+        max_answer_length=None,
+        chunk_size=4096,
+        split=None,
+        streaming=False,
+        mode="ldqa",
+    ):
+        """Base class for loading HuggingFace datasets
+        Args:
+            dataset_uuid: str, HuggingFace dataset uuid
+            name: str, name of the dataset configuration, if exists
+            tokenizer: PreTrainedTokenizerBase, tokenizer to use for tokenization
+            max_length: int, maximum length of the input, used in tokenization for icl
+            max_answer_length: int, maximum length of the answer,
+            used in tokenization for icl
+            chunk_size: int, maximum length of the document chunk,
+            used in tokenization for ldqa
+            split: str, split of the dataset to load
+            streaming: bool, whether to load the dataset in streaming mode
+            mode: str, mode of the dataset, one of ["ldqa", "icl"]
+        """
+        if mode not in ["ldqa", "icl"]:
+            raise NotImplementedError("Only LDQA and ICL modes are supported")
+
         self.dataset_uuid = dataset_uuid
+        self.name = name
+        self.tokenizer = tokenizer
+        self.max_length = max_length
+        self.max_answer_length = max_answer_length
+        self.chunk_size = chunk_size
+        self.split = split
+        self.streaming = streaming
+        self.mode = mode
+
+        dataset = self.get_dataset()
+        dataset = self.transform(dataset)
+        dataset = dataset.map(self.clean, batched=False)
+        if mode == "icl":
+            dataset = dataset.map(
+                self.tokenize_icl,
+                batched=True,
+                remove_columns=["query", "document", "label"],
+            )
+
+        self.dataset = dataset
 
     def get_dataset(self) -> dict:
         """Returns the corresponding dataset from huggingface"""
+        return load_dataset(
+            self.dataset_uuid,
+            name=self.name,
+            split=self.split,
+            streaming=self.streaming,
+        ).with_format("torch")
+
+    def transform(self, dataset):
+        """Transforms the dataset columns.
+        Removes unwanted columns and renames columns"""
         raise NotImplementedError
 
-
-class TweetQA_Dataset(HFDataset):
-    """HuggingFace TweetQA dataset
-    Downloads the dataset from HuggingFace or loads from disk
-    Keys in the example:
-        `query`: str
-        `document`: str
-        `label` [optional]: str
-        `query_ids`: torch.Tensor of shape (1, query_length)
-        `query_attention_mask`: torch.Tensor of shape (1, query_length)
-        `document_ids`: torch.Tensor of shape (1, num_chunks, chunk_size)
-        `document_attention_mask`: torch.Tensor of shape (1, num_chunks, chunk_size)
-        `label_ids`[optional]: torch.Tensor of shape (1, output_length)
-        `label_attention_mask` [optional]: torch.Tensor of shape (1, output_length)
-    """
-
-    def __init__(
-        self,
-        tokenizer,
-        split="train",
-        chunk_size=4096,
-        streaming=False,
-        **kwargs,
-    ):
-        super(TweetQA_Dataset, self).__init__(dataset_uuid="tweet_qa", **kwargs)
-        CACHE_PATH = "~/tweetqa_dataset"
-
-        try:
-            self.dataset = load_from_disk(CACHE_PATH)
-        except FileNotFoundError:
-            print("Dataset not found, loading from huggingface")
-            dataset = self.get_dataset(split=split, streaming=streaming)
-            dataset = dataset.remove_columns("qid")
-            dataset = dataset.rename_column("Question", "query")
-            dataset = dataset.rename_column("Answer", "label")
-            dataset = dataset.rename_column("Tweet", "document")
-            dataset = dataset.map(self.preprocess)
-
-            # dataset.save_to_disk(CACHE_PATH)  # TODO: unable to save IterableDataset
-            self.dataset = dataset
-
-        self.tokenizer = tokenizer
-        self.chunk_size = chunk_size
-
-    def get_dataset(self, split="train", streaming=False) -> dict:
-        dataset = load_dataset(
-            self.dataset_uuid, split=split, streaming=streaming
-        ).with_format("torch")
-        return dataset
-
-    def preprocess(self, example: dict) -> dict:
-        """Preprocess the dataset with basic cleanup and splitting into query and document"""
-        # test split does not have a label
-        example["label"] = None if not example["label"] else example["label"][0]
-        example["document"] = tweet_preprocessor.clean(example["document"])
-
-        return example
+    def clean(self, example: dict) -> dict:
+        """Cleans the dataset text"""
+        raise NotImplementedError
 
     def tokenize(self, example: dict) -> dict:
-        """Tokenize the dataset with the encoder tokenizer"""
+        """Tokenizes the dataset for long document QA"""
         tokenized_query = self.tokenizer(
             example["query"],
             padding=True,
@@ -115,10 +119,98 @@ class TweetQA_Dataset(HFDataset):
 
         return return_dict
 
+    def tokenize_icl(self, examples: dict) -> dict:
+        """Tokenizes the dataset for in-context learning"""
+        formatted_texts = []
+        for query, document in zip(examples["query"], examples["document"]):
+            formatted_texts.append(f"Context: {document} Question: {query}")
+
+        model_inputs = self.tokenizer(
+            formatted_texts,
+            max_length=self.max_length,
+            truncation=True,
+            return_offsets_mapping=False,
+            padding="max_length",
+        )
+
+        # create global_attention_mask lists with 1 at the first token
+        # of each question and 0 for the rest
+        global_attention_masks = []
+        for input_ids in model_inputs["input_ids"]:
+            global_attention_masks.append([1] + [0] * (len(input_ids) - 1))
+        model_inputs["global_attention_mask"] = global_attention_masks
+
+        if "label" in examples and not all(
+            [label is None for label in examples["label"]]
+        ):
+            text_target = ["Answer: " + answer for answer in examples["label"]]
+            labels = self.tokenizer(
+                text_target=text_target,
+                max_length=self.max_answer_length,  # TODO: this is a guess
+                truncation=True,
+            )
+
+            model_inputs["labels"] = labels["input_ids"]
+        return model_inputs
+
+
+class TweetQA_Dataset(HFDataset):
+    """HuggingFace TweetQA dataset
+    Keys in the example:
+        `query`: str
+        `document`: str
+        `label` [optional]: str
+        `query_ids`: torch.Tensor of shape (1, query_length)
+        `query_attention_mask`: torch.Tensor of shape (1, query_length)
+        `document_ids`: torch.Tensor of shape (1, num_chunks, chunk_size)
+        `document_attention_mask`: torch.Tensor of shape (1, num_chunks, chunk_size)
+        `label_ids`[optional]: torch.Tensor of shape (1, output_length)
+        `label_attention_mask` [optional]: torch.Tensor of shape (1, output_length)
+    """
+
+    def __init__(
+        self,
+        tokenizer,
+        chunk_size=4096,
+        split=None,
+        streaming=False,
+        mode="ldqa",
+        **kwargs,
+    ):
+        super(TweetQA_Dataset, self).__init__(
+            dataset_uuid="tweet_qa",
+            tokenizer=tokenizer,
+            max_length=384,  # TODO: calculate this
+            max_answer_length=32,  # TODO: calculate this
+            chunk_size=chunk_size,
+            split=split,
+            streaming=streaming,
+            mode=mode,
+            **kwargs,
+        )
+
+    def transform(self, dataset):
+        """Transforms the dataset columns.
+        Removes unwanted columns and renames columns"""
+        return (
+            dataset.remove_columns("qid")
+            .rename_column("Question", "query")
+            .rename_column("Answer", "label")
+            .rename_column("Tweet", "document")
+        )
+
+    def clean(self, example: dict) -> dict:
+        """Preprocess the dataset with basic cleanup;
+        splitting into query and document"""
+        # test split does not have a label
+        example["label"] = None if not example["label"] else example["label"][0]
+        example["document"] = tweet_preprocessor.clean(example["document"])
+
+        return example
+
 
 class MuLD_Dataset(HFDataset):
     """HuggingFace MuLD Dataset for NarrativeQA
-    Downloads the dataset from HuggingFace or loads from disk
     Preprocesses - cleans BOM and HTML tags, extra spaces and new lines; splits into query and document
     Tokenizes the dataset with the given tokenizer; Document is chunked, query and output [optional] are not
     Keys in the example:
@@ -138,86 +230,46 @@ class MuLD_Dataset(HFDataset):
         tokenizer,
         split="train",
         chunk_size=4096,
-        streaming=False,
-        hdf5_file_path=None,
+        streaming=True,
+        mode="ldqa",
         **kwargs,
     ):
-        super(MuLD_Dataset, self).__init__(dataset_uuid="ghomasHudson/muld", **kwargs)
-        CACHE_PATH = "~/muld_dataset"
+        if mode != "ldqa":
+            raise NotImplementedError("Only LDQA mode is supported with MuLD dataset")
 
-        try:
-            self.dataset = load_from_disk(CACHE_PATH)
-        except FileNotFoundError:
-            print("Dataset not found, loading from huggingface")
-            dataset = self.get_dataset(split=split, streaming=streaming)
-            dataset = dataset.map(self.preprocess)
-            dataset = dataset.remove_columns(["input", "metadata"])
-            dataset = dataset.rename_column("output", "label")
-            # dataset.save_to_disk(CACHE_PATH)  # TODO: unable to save IterableDataset
-            self.dataset = dataset
+        super(MuLD_Dataset, self).__init__(
+            dataset_uuid="ghomasHudson/muld",
+            name="NarrativeQA",
+            tokenizer=tokenizer,
+            split=split,
+            streaming=streaming,
+            mode="ldqa",
+            **kwargs,
+        )
 
-        self.tokenizer = tokenizer
-        self.chunk_size = chunk_size
+    def transform(self, dataset):
+        """Transforms the dataset columns.
+        Removes unwanted columns and renames columns"""
+        return (
+            dataset.rename_column("input", "document")
+            .rename_column("output", "label")
+            .remove_columns(["metadata"])
+        )
 
-    def get_dataset(self, split="train", streaming=False) -> dict:
-        dataset = load_dataset(
-            self.dataset_uuid, "NarrativeQA", split=split, streaming=streaming
-        ).with_format("torch")
-        return dataset
-
-    def preprocess(self, example: dict) -> dict:
+    def clean(self, example: dict) -> dict:
         """Preprocess the dataset with basic cleanup and splitting into query and document"""
 
         # remove BOM tags: '\u00ef\u00bb\u00bf' and HTML tags using regex
-        input = example["input"].replace("\u00ef\u00bb\u00bf", "")
-        input = re.sub(r"<.*?>", "", input)
+        document = example["document"].replace("\u00ef\u00bb\u00bf", "")
+        document = re.sub(r"<.*?>", "", document)
         # remove newlines and extra spaces
-        input = input.replace("\n", " ").strip()
+        document = document.replace("\n", " ").strip()
 
         # splits input into query and document
-        query, document = input.split("?", 1)
+        query, document = document.split("?", 1)
         query = query.strip() + "?"
 
         return {"query": query, "document": document}
-
-    def tokenize(self, example: dict) -> dict:
-        """Tokenize the dataset with the encoder tokenizer"""
-        tokenized_query = self.tokenizer(
-            example["query"],
-            padding=True,
-            truncation=False,
-            return_tensors=None,
-            pad_to_multiple_of=8,
-        )
-        tokenized_document = self.tokenizer(
-            example["document"],  # TODO: check if each chunk has a BOS token
-            padding=True,
-            truncation=True,
-            max_length=self.chunk_size,
-            return_tensors=None,
-            pad_to_multiple_of=8,
-            return_overflowing_tokens=True,
-        )
-
-        return_dict = {
-            "query_ids": tokenized_query.input_ids,
-            "query_attention_mask": tokenized_query.attention_mask,
-            "document_ids": tokenized_document.input_ids,
-            "document_attention_mask": tokenized_document.attention_mask,
-        }
-
-        if "label" in example:
-            tokenized_output = self.tokenizer(
-                example["label"],
-                padding=True,
-                truncation=False,
-                return_tensors=None,
-                pad_to_multiple_of=8,
-            )
-            return_dict["label_ids"] = tokenized_output.input_ids
-            return_dict["label_attention_mask"] = tokenized_output.attention_mask
-
-        return return_dict
 
 
 class SQuAD_Dataset(HFDataset):
@@ -240,70 +292,31 @@ class SQuAD_Dataset(HFDataset):
         split="train",
         streaming=False,
         mode="icl",
-        debug=False,
         **kwargs,
     ):
-        super(SQuAD_Dataset, self).__init__(dataset_uuid="squad", **kwargs)
-
-        if mode != "icl":
-            raise NotImplementedError("Only ICL mode is supported")
-
-        self.tokenizer = tokenizer
-        preprocess = self.preprocess_icl
-        dataset = self.get_dataset(split=split, streaming=streaming)
-        if debug:
-            dataset["train"] = dataset["train"].select(range(100))
-            dataset["validation"] = dataset["validation"].select(range(20))
-        for key, val in dataset.items():
-            dataset[key] = val.shuffle(seed=42)
-        dataset = dataset.map(
-            preprocess,
-            batched=True,
-            remove_columns=["id", "title", "context", "question", "answers"],
+        super(SQuAD_Dataset, self).__init__(
+            dataset_uuid="squad",
+            tokenizer=tokenizer,
+            max_length=384,  # TODO: calculate this
+            max_answer_length=32,  # TODO: calculate this
+            split=split,
+            streaming=streaming,
+            mode=mode,
+            **kwargs,
         )
 
-        self.dataset = dataset
-
-    def get_dataset(self, split="train", streaming=False) -> dict:
-        dataset = load_dataset(
-            self.dataset_uuid, split=split, streaming=streaming
-        ).with_format("torch")
-        return dataset
-
-    def preprocess_icl(self, example: dict) -> dict:
-        """Preprocess the dataset with basic cleanup and splitting into query
-        and document"""
-
-        questions = [q.strip() for q in example["question"]]
-
-        formatted_texts = []
-        for context, question in zip(example["context"], questions):
-            formatted_texts.append(f"Context: {context} Question: {question}")
-
-        model_inputs = self.tokenizer(
-            formatted_texts,
-            max_length=384,
-            truncation=True,
-            return_offsets_mapping=False,
-            padding="max_length",
+    def transform(self, dataset):
+        return (
+            dataset.remove_columns(["id", "title"])
+            .rename_column("context", "document")
+            .rename_column("question", "query")
+            .rename_column("answers", "label")
         )
 
-        # create global_attention_mask lists with 1 at the first token
-        # of each question and 0 for the rest
-        global_attention_masks = []
-        for input_ids in model_inputs["input_ids"]:
-            global_attention_masks.append([1] + [0] * (len(input_ids) - 1))
-        model_inputs["global_attention_mask"] = global_attention_masks
-
-        text_target = ["Answer: " + answer["text"][0] for answer in example["answers"]]
-        labels = self.tokenizer(
-            text_target=text_target,
-            max_length=32,  # TODO: this is a guess
-            truncation=True,
-        )
-
-        model_inputs["labels"] = labels["input_ids"]
-        return model_inputs
+    def clean(self, example: dict) -> dict:
+        example["query"] = example["query"].strip()
+        example["label"] = example["label"]["text"][0].strip()
+        return example
 
 
 class DataCollatorForLDQA:
