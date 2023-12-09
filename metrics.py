@@ -42,26 +42,10 @@ class MetricComputer:
             predictions=decoded_preds, references=decoded_labels
         )
 
-        # for bleu convert the references to a list of lists
-        decoded_labels = [[label] for label in decoded_labels]
-        bleu_score = self.bleu.compute(
-            predictions=decoded_preds, references=decoded_labels
-        )
-        # expand n-gram precisions list to a dictionary
-        bleu_score.update(
-            {
-                f"precision_{i}": score
-                for i, score in enumerate(bleu_score["precisions"])
-            }
-        )
-        del bleu_score["precisions"]
-        # prefix all keys with bleu
-        bleu_score = {f"bleu_{k}": v for k, v in bleu_score.items()}
-
         # combine all metrics into one dictionary
         results = {
             k: v
-            for score_dict in [rouge_score, bleu_score, meteor_score]
+            for score_dict in [rouge_score, meteor_score]
             for k, v in score_dict.items()
         }
         return results

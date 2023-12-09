@@ -3,38 +3,20 @@ import torch.nn as nn
 from transformers import PreTrainedModel, PretrainedConfig
 
 
-def shift_tokens_right(
-    input_ids: torch.Tensor, pad_token_id: int, decoder_start_token_id: int
-):
-    """
-    Shift input ids one token to the right.
-    """
-    shifted_input_ids = input_ids.new_zeros(input_ids.shape)
-    shifted_input_ids[:, 1:] = input_ids[:, :-1].clone()
-    shifted_input_ids[:, 0] = decoder_start_token_id
-
-    if pad_token_id is None:
-        raise ValueError("config.pad_token_id has to be defined.")
-    # replace possible -100 values in labels by `pad_token_id`
-    shifted_input_ids.masked_fill_(shifted_input_ids == -100, pad_token_id)
-
-    return shifted_input_ids
-
-
 class LDQAModelConfig(PretrainedConfig):
-    model_type = "ldqa"
+    model_type = "LQDA"
 
-    def __init__(self, model_type="longformer", **kwargs):
+    def __init__(self, model_type="LDQA", **kwargs):
         super().__init__(**kwargs)
-        if model_type != "longformer":
-            raise ValueError("Only longformer is supported")
         self.model_type = model_type
 
 
 class LDQAModel(PreTrainedModel):
     config_class = LDQAModelConfig
 
-    def __init__(self, config, base_lm, encoder, projection_head, max_chunks_for_doc=1):
+    def __init__(
+        self, config, base_lm, encoder, projection_head, max_chunks_for_doc=1
+    ):
         super().__init__(config)
         self.base_lm = base_lm
         self.encoder = encoder
@@ -76,9 +58,11 @@ class LDQAModel(PreTrainedModel):
 
         # pass encoded document to projection head
         # shape of document_outputs before project_head = (batch_size, num_chunks, chunk_length, hidden_size)
-        document_outputs = self.projection_head(document_outputs)
+        document_outputs = self.projection_head(
+            document_outputs, x_mask=document_attention_mask
+        )
 
-        attention_mask = self.prepare_attention_mask(document_outputs)
+        attention_mask = self._prepare_attention_mask(document_attention_mask)
 
         # pass encoded document and query to base-lm
         base_lm_outputs = self.base_lm(
@@ -116,18 +100,24 @@ class LDQAModel(PreTrainedModel):
         document_outputs = torch.stack(document_outputs, dim=1)
         return document_outputs
 
-    def prepare_attention_mask(self, document_outputs):
-        # Shape of document_outputs after pooling projection head  = (batch_size, num_chunks, hidden_size
-        num_chunks = document_outputs.shape[1]
-        attention_mask = torch.full(  # consider all tokens with projection head
-            size=(document_outputs.shape[0], self.max_chunks_for_doc),
-            fill_value=-3.4028e38,  # -inf
-            dtype=document_outputs.dtype,
-            device=document_outputs.device,
+    def _prepare_attention_mask(self, document_attention_mask, repeat=1):
+        """Creates cross attention mask for base-lm. Takes the document_attention_mask
+        and returns a mask for post-projection operations. Chunks with at least one
+        non-padded token are considered valid.
+
+        :param document_attention_mask: torch.LongTensor of shape [batch_size, num_chunks, chunk_length]
+        :param repeat: int, number of times to repeat the mask per chunk
+        useful when projection head returns multiple outputs per chunk
+        :return: torch.LongTensor of shape [batch_size, 1, 1, num_chunks]
+        """
+        cross_attn_attention_mask = document_attention_mask.any(dim=-1).long()
+        cross_attn_attention_mask = (
+            cross_attn_attention_mask.repeat_interleave(repeat, dim=-1)
         )
-        attention_mask[:, :num_chunks] = 0
-        attention_mask = attention_mask.unsqueeze(1).unsqueeze(2)
-        return attention_mask
+        cross_attn_attention_mask = cross_attn_attention_mask.unsqueeze(
+            1
+        ).unsqueeze(2)
+        return cross_attn_attention_mask
 
     def generate(
         self,
@@ -150,12 +140,15 @@ class LDQAModel(PreTrainedModel):
             document_outputs = document_encoding_outputs
 
         # shape of document_outputs before project_head = (batch_size, num_chunks, chunk_length, hidden_size)
-        document_outputs = self.projection_head(document_outputs)
+        document_outputs = self.projection_head(
+            document_outputs, x_mask=document_attention_mask
+        )
 
-        attention_mask = self.prepare_attention_mask(document_outputs)
+        attention_mask = self._prepare_attention_mask(document_attention_mask)
 
         return self.base_lm.generate(
             inputs=query_ids,
+            attention_mask=query_attention_mask,
             encoder_cross_attn_inputs=document_outputs,
             encoder_cross_attn_attention_masks=attention_mask,
         )

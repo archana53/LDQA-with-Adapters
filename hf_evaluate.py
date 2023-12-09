@@ -31,7 +31,7 @@ def parse_args():
     projection = parser.add_argument_group("Projection")
     projection.add_argument("--proj_input_dim", type=int, default=768)
     projection.add_argument("--proj_output_dim", type=int, default=768)
-    projection.add_argument("--proj_num_self_attention_heads", type=int, default=3)
+    projection.add_argument("--proj_num_self_attention_heads", type=int, default=2)
     projection.add_argument("--proj_num_cross_attention_heads", type=int, default=2)
     projection.add_argument(
         "--proj_type",

@@ -4,6 +4,7 @@ import itertools
 from torch.optim import AdamW
 from transformers import (
     AutoTokenizer,
+    AutoModelForSeq2SeqLM,
     LEDForConditionalGeneration,
     Seq2SeqTrainer,
     Seq2SeqTrainingArguments,
@@ -36,6 +37,7 @@ def parse_args():
     train.add_argument("--save_steps", type=int, default=1000)
     train.add_argument("--save_total_limit", type=int, default=2)
     train.add_argument("--output_dir", type=str, default="./output")
+    train.add_argument("--run_name", type=str, default=None)
 
     lm = parser.add_argument_group("LM")
     lm.add_argument(
@@ -54,14 +56,18 @@ def parse_args():
         "--proj_type",
         type=str,
         default="AvgPool",
-        choices=["AvgPool", "MaxPool", "Attention", "QueryAware"],
+        choices=["AvgPool", "MaxPool", "Linear", "Attention", "QueryAware"],
     )
     args = parser.parse_args()
 
     # split args into separate dicts
     arg_groups = {}
     for group in parser._action_groups:
-        if group.title in ["positional arguments", "optional arguments", "options"]:
+        if group.title in [
+            "positional arguments",
+            "optional arguments",
+            "options",
+        ]:
             continue
         group_dict = {a.dest: getattr(args, a.dest, None) for a in group._group_actions}
         arg_groups[group.title] = argparse.Namespace(**group_dict)
@@ -81,7 +87,10 @@ def print_args(**kwargs):
 def setup_dataset(dataset_config, train_args, tokenizer):
     """Setup dataset object and data collator."""
     dataset_object = dataset_config["cls"](
-        tokenizer=tokenizer, split=None, streaming=True, chunk_size=4096
+        tokenizer=tokenizer,
+        split=None,
+        streaming=dataset_config["streaming"],
+        chunk_size=4096,
     )
 
     train_dataset = dataset_object.dataset["train"]
@@ -108,6 +117,8 @@ if __name__ == "__main__":
     # parse arguments and print to console
     all_args = parse_args()
     wandb.init(project="huggingface", entity="adv-nlp-ldqa", config=all_args)
+    if all_args["Training"].run_name is not None:
+        wandb.run.name = all_args["Training"].run_name
     print_args(**all_args)
     train_args = all_args["Training"]
     lm_args = all_args["LM"]
@@ -122,16 +133,17 @@ if __name__ == "__main__":
     )
 
     # set up base-lm and document encoder
-    model_original = LEDForConditionalGeneration.from_pretrained(
-        "allenai/led-base-16384"
-    )
+    model_original = AutoModelForSeq2SeqLM.from_pretrained("allenai/led-base-16384")
     base_lm = LEDForConditionalGeneration(
         model_original.config, cross_attn_encoder=True
     )
     base_lm.load_state_dict(model_original.state_dict(), strict=False)
 
-    encoder_config = EncoderType[lm_args.encoder_type].value()
-    encoder = encoder_config.get_model()
+    if train_args.hdf5_path is None:
+        encoder_config = EncoderType[lm_args.encoder_type].value()
+        encoder = encoder_config.get_model()
+    else:
+        encoder = None
 
     # set up projection head
     projection_head_config = ProjectionHeadType[projection_args.proj_type].value
@@ -153,9 +165,13 @@ if __name__ == "__main__":
         max_chunks_for_doc=dataset_config["max_chunks_for_doc"],
     )
 
-    # set up generation config
-    generation_config = model_original.generation_config
-    generation_config.bos_token_id = model_tokenizer.bos_token_id
+    # set generate hyperparameters
+    model.config.num_beams = 4
+    model.config.max_length = 40
+    model.config.min_length = 2
+    model.config.length_penalty = 2.0
+    model.config.early_stopping = True
+    model.config.no_repeat_ngram_size = 3
 
     total_steps = train_args.total_steps
     training_args = Seq2SeqTrainingArguments(
@@ -184,7 +200,7 @@ if __name__ == "__main__":
     print("Trainable Parameters".center(48, "-"))
     trainable_param_count = 0
     for name, module in model.named_modules():
-        if name.endswith("cross") or name.endswith("projection"):
+        if name.endswith("cross") or name.startswith("projection_head"):
             print(name)
             trainable_params.append(module.parameters())
             trainable_param_count += sum(p.numel() for p in module.parameters())
@@ -193,7 +209,8 @@ if __name__ == "__main__":
     # print parameter summaries
     print("-" * 48)
     print("Parameter Summary".center(48, "-"))
-    print(f"Encoder parameters: {sum(p.numel() for p in encoder.parameters())}")
+    if encoder is not None:
+        print(f"Encoder parameters: {sum(p.numel() for p in encoder.parameters())}")
     print(f"Base LM parameters: {sum(p.numel() for p in base_lm.parameters())}")
     print(
         f"Projection head parameters: {sum(p.numel() for p in projection_head.parameters())}"
@@ -204,7 +221,9 @@ if __name__ == "__main__":
 
     trainable_params = itertools.chain(*trainable_params)
     optimizer = AdamW(
-        trainable_params, lr=train_args.lr, weight_decay=train_args.weight_decay
+        trainable_params,
+        lr=train_args.lr,
+        weight_decay=train_args.weight_decay,
     )
 
     lr_scheduler = get_scheduler(
