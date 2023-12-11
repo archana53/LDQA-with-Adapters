@@ -168,12 +168,12 @@ if __name__ == "__main__":
     )
 
     # set generate hyperparameters
-    model.config.num_beams = 4
-    model.config.max_length = 40
-    model.config.min_length = 2
-    model.config.length_penalty = 2.0
-    model.config.early_stopping = True
-    model.config.no_repeat_ngram_size = 3
+    model.base_lm.config.num_beams = 4
+    model.base_lm.config.max_length = dataset_config["generation_config"]["max_length"]
+    model.base_lm.config.min_length = 3
+    model.base_lm.config.length_penalty = 2.0
+    model.base_lm.config.early_stopping = True
+    model.base_lm.config.no_repeat_ngram_size = 3
 
     total_steps = train_args.total_steps
     training_args = Seq2SeqTrainingArguments(

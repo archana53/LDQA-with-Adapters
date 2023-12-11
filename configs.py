@@ -6,6 +6,9 @@ DATASET_CONFIG = {
         "max_chunks_for_doc": 1,
         "hdf5_path": "/coc/flash8/akutumbaka3/DDRL/data/tweetqa_full_global/embeddings.h5",
         "streaming": False,
+        "generation_config": {
+            "max_length": 16,
+        },
     },
     "MuLD": {
         "cls": MuLD_Dataset,
@@ -18,5 +21,8 @@ DATASET_CONFIG = {
         "max_chunks_for_doc": 1,
         "hdf5_path": "/coc/flash8/akutumbaka3/DDRL/data/squad_full_global/embeddings.h5",
         "streaming": False,
+        "generation_config": {
+            "max_length": 30,
+        },
     },
 }
