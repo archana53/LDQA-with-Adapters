@@ -82,6 +82,11 @@ class HFDataset:
 
     def tokenize(self, example: dict) -> dict:
         """Tokenizes the dataset for long document QA"""
+
+        # format the text
+        example["query"] = "Question: " + example["query"]
+        example["document"] = "Context: " + example["document"]
+
         tokenized_query = self.tokenizer(
             example["query"],
             padding=True,
@@ -90,7 +95,7 @@ class HFDataset:
             pad_to_multiple_of=8,
         )
         tokenized_document = self.tokenizer(
-            example["document"],  # TODO: check if each chunk has a BOS token
+            example["document"],
             padding=True,
             truncation=True,
             max_length=self.chunk_size,
@@ -99,14 +104,13 @@ class HFDataset:
             return_overflowing_tokens=True,
         )
 
-        return_dict = {
-            "query_ids": tokenized_query.input_ids,
-            "query_attention_mask": tokenized_query.attention_mask,
-            "document_ids": tokenized_document.input_ids,
-            "document_attention_mask": tokenized_document.attention_mask,
-        }
+        example["query_ids"] = tokenized_query.input_ids
+        example["query_attention_mask"] = tokenized_query.attention_mask
+        example["document_ids"] = tokenized_document.input_ids
+        example["document_attention_mask"] = tokenized_document.attention_mask
 
         if "label" in example and example["label"] is not None:
+            example["label"] = "Answer: " + example["label"]
             tokenized_output = self.tokenizer(
                 example["label"],
                 padding=True,
@@ -114,10 +118,10 @@ class HFDataset:
                 return_tensors=None,
                 pad_to_multiple_of=8,
             )
-            return_dict["label_ids"] = tokenized_output.input_ids
-            return_dict["label_attention_mask"] = tokenized_output.attention_mask
+            example["label_ids"] = tokenized_output.input_ids
+            example["label_attention_mask"] = tokenized_output.attention_mask
 
-        return return_dict
+        return example
 
     def tokenize_icl(self, examples: dict) -> dict:
         """Tokenizes the dataset for in-context learning"""
@@ -354,6 +358,13 @@ class DataCollatorForLDQA:
                 for key in encoded_inputs[0].keys()
             }
 
+        encoded_inputs["query"] = [
+            "Question: " + query for query in encoded_inputs["query"]
+        ]
+        encoded_inputs["document"] = [
+            "Context: " + document for document in encoded_inputs["document"]
+        ]
+
         tokenized_query = self.tokenizer(
             encoded_inputs["query"],
             padding=True,
@@ -408,6 +419,9 @@ class DataCollatorForLDQA:
         # document_encoding_outputs: (batch_size, max_num_chunks, chunk_size, hidden_size)
 
         if "label" in encoded_inputs:
+            encoded_inputs["label"] = [
+                "Answer: " + answer for answer in encoded_inputs["label"]
+            ]
             tokenized_output = self.tokenizer(
                 encoded_inputs["label"],
                 padding=True,
@@ -553,7 +567,7 @@ class DataCollatorForLDQA:
 if __name__ == "__main__":
     from transformers import AutoTokenizer
 
-    tokenizer = AutoTokenizer.from_pretrained("allenai/longformer-base-4096")
+    tokenizer = AutoTokenizer.from_pretrained("allenai/led-base-16384")
     muld = MuLD_Dataset(streaming=True, split=None, tokenizer=tokenizer)
     for ex in muld.dataset["train"]:
         break
